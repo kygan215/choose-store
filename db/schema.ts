@@ -1,4 +1,45 @@
-// Intentionally empty by default.
-// Add Drizzle tables here when the site actually needs a database.
-// See examples/d1/db/schema.ts for an opt-in example.
-export {};
+import { index, integer, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
+
+export const jobs = sqliteTable("jobs", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  filename: text("filename"),
+  status: text("status").notNull().default("等待开始匹配"),
+  totalStores: integer("total_stores").notNull().default(0),
+  processedStores: integer("processed_stores").notNull().default(0),
+  matchedStores: integer("matched_stores").notNull().default(0),
+  successStores: integer("success_stores").notNull().default(0),
+  failedStores: integer("failed_stores").notNull().default(0),
+  configJson: text("config_json").notNull().default("{}"),
+  stage: text("stage").notNull().default("match"),
+  control: text("control").notNull().default("idle"),
+  currentStore: text("current_store").notNull().default(""),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [index("idx_jobs_created_at").on(table.createdAt)]);
+
+export const stores = sqliteTable("stores", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  jobId: integer("job_id").references(() => jobs.id, { onDelete: "cascade" }),
+  inputName: text("input_name").notNull(),
+  standardName: text("standard_name"),
+  amapPoiId: text("amap_poi_id"),
+  longitude: real("longitude"),
+  latitude: real("latitude"),
+  province: text("province").default(""),
+  city: text("city").default(""),
+  district: text("district").default(""),
+  address: text("address").default(""),
+  userCode: text("user_code"),
+  brand: text("brand"),
+  matchScore: real("match_score"),
+  matchStatus: text("match_status").default(""),
+  status: text("status").notNull().default("等待匹配"),
+  errorMessage: text("error_message"),
+  poisJson: text("pois_json").notNull().default("[]"),
+  analysisJson: text("analysis_json"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  index("idx_stores_job_id").on(table.jobId),
+  index("idx_stores_status").on(table.status),
+]);

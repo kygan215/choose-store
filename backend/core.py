@@ -297,6 +297,13 @@ AMAP_ERRORS = {
     "10001": ("AMAP_INVALID_KEY", "高德地图 Key 无效，请检查 Web 服务 Key"),
     "10003": ("AMAP_DAILY_LIMIT", "高德地图接口当日调用量已达上限"),
     "10004": ("AMAP_RATE_LIMIT", "高德地图接口调用频率受限，请稍后重试"),
+    "10014": ("AMAP_RATE_LIMIT", "高德地图接口 QPS 超限，请稍后重试"),
+    "10015": ("AMAP_RATE_LIMIT", "高德地图单机 QPS 受限，请稍后重试"),
+    "10019": ("AMAP_RATE_LIMIT", "高德地图服务总 QPS 超限，请稍后重试"),
+    "10020": ("AMAP_RATE_LIMIT", "高德地图 Key 的接口 QPS 超限，请稍后重试"),
+    "10021": ("AMAP_RATE_LIMIT", "高德地图账号的接口 QPS 超限，请稍后重试"),
+    "10022": ("AMAP_RATE_LIMIT", "高德地图 Key 与 IP 的接口 QPS 超限，请稍后重试"),
+    "10023": ("AMAP_RATE_LIMIT", "高德地图 Key 的 QPS 超限，请稍后重试"),
     "10009": ("AMAP_KEY_TYPE_ERROR", "高德 Key 类型不正确，请使用 Web 服务 Key"),
 }
 

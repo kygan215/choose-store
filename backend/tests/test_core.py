@@ -84,6 +84,7 @@ def test_distance_dedupe_and_mapping():
 
 def test_errors_and_excel_injection():
     assert amap_error("10004")[0]=="AMAP_RATE_LIMIT"
+    assert amap_error("10021")==("AMAP_RATE_LIMIT", "高德地图账号的接口 QPS 超限，请稍后重试")
     assert safe_excel("=1+1")=="'=1+1"
     assert safe_excel("@SUM(A1)")=="'@SUM(A1)"
     assert safe_excel("正常")=="正常"

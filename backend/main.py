@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import os
 import uuid
@@ -23,6 +24,8 @@ from .core import confidence_status, deduplicate_pois, distance_bucket, evaluate
 from .database import AnalysisJob, AnalysisJobStore, AuditLog, BusinessDistrictAnalysis, BusinessDistrictConfig, PoiCategory, PoiResult, SearchRequestLog, SessionLocal, Store, StoreMatchCandidate, init_db
 
 app = FastAPI(title="门店周边 POI 搜索与分析平台", version="1.2.0")
+JOB_RUNNERS: dict[int, asyncio.Task[Any]] = {}
+MAX_CONCURRENT_STORES = max(1, min(5, int(os.getenv("MAX_CONCURRENT_STORES", os.getenv("AMAP_MAX_CONCURRENCY", "3")))))
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -112,7 +115,7 @@ class AddressConfirmBody(AddressQuery):
 
 
 class BusinessAnalysisBody(BaseModel):
-    radii: list[int] = Field(default_factory=lambda: [500, 1000, 2000])
+    radii: list[int] = Field(default_factory=lambda: [500])
 
     @model_validator(mode="after")
     def validate_business_radii(self):
@@ -440,6 +443,12 @@ async def _run_business_analysis(store_id: int, radii: list[int], analysis_job_i
             feature_vector=result["feature_vector"], evidence=result["evidence"], strengths=result["strengths"], weaknesses=result["weaknesses"],
             truncation_flags=result["truncation_flags"], warning_messages=result["warning_messages"],
         )
+        for old in db.scalars(select(BusinessDistrictAnalysis).where(
+            BusinessDistrictAnalysis.analysis_job_id == analysis_job_id,
+            BusinessDistrictAnalysis.store_id == store_id,
+        )).all():
+            db.delete(old)
+        db.flush()
         db.add(record)
         job = db.get(AnalysisJob, analysis_job_id)
         if job:
@@ -500,8 +509,8 @@ def update_business_config(body: dict[str, Any]):
 MAX_UPLOAD = 15 * 1024 * 1024
 
 
-def _validate_import_rows(rows: list[dict[str, Any]], mapping: dict[str, str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
-    valid, preview, duplicate_count = [], [], 0
+def _validate_import_rows(rows: list[dict[str, Any]], mapping: dict[str, str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int, list[dict[str, Any]]]:
+    valid, preview, validated, duplicate_count = [], [], [], 0
     seen: set[tuple[str, ...]] = set()
     for index, row in enumerate(rows, start=2):
         name = str(row.get(mapping.get("name", ""), "")).strip()
@@ -518,11 +527,12 @@ def _validate_import_rows(rows: list[dict[str, Any]], mapping: dict[str, str]) -
         else:
             seen.add(key)
         enriched = {**row, "_row_number": index, "_valid": not issues, "_issues": issues}
+        validated.append(enriched)
         if len(preview) < 20:
             preview.append(enriched)
         if not issues:
             valid.append(row)
-    return valid, preview, duplicate_count
+    return valid, preview, duplicate_count, validated
 
 
 @app.post("/api/import/preview")
@@ -548,7 +558,7 @@ async def import_preview(file: UploadFile = File(...)):
         raise HTTPException(400, "门店名称和详细地址至少需要识别到一列")
     clean_df = df.fillna("").astype(str)
     all_rows = clean_df.to_dict("records")
-    valid_rows, rows, duplicates = _validate_import_rows(all_rows, mapping)
+    valid_rows, rows, duplicates, selectable_rows = _validate_import_rows(all_rows, mapping)
     warnings = []
     if duplicates:
         warnings.append(f"发现 {duplicates} 行重复门店，创建任务时会自动跳过")
@@ -556,7 +566,7 @@ async def import_preview(file: UploadFile = File(...)):
     if invalid > 0:
         warnings.append(f"发现 {invalid} 行缺少门店名称和详细地址")
     return ok({
-        "filename":filename,"headers":headers,"mapping":mapping,"rows":rows,"all_rows":all_rows,
+        "filename":filename,"file_size":len(content),"headers":headers,"mapping":mapping,"rows":rows,"all_rows":all_rows,"selectable_rows":selectable_rows,
         "total_rows":len(df),"valid_rows":len(valid_rows),"invalid_rows":len(all_rows)-len(valid_rows),
         "duplicate_rows":duplicates,"warnings":warnings,
     })
@@ -578,18 +588,18 @@ def import_confirm(body: dict[str, Any]):
     mapping = body.get("mapping") or {}
     if "name" not in mapping and "address" not in mapping:
         raise HTTPException(400, "请至少映射门店名称或详细地址")
-    valid_rows, _, duplicates = _validate_import_rows(rows, mapping)
+    valid_rows, _, duplicates, _ = _validate_import_rows(rows, mapping)
     if not valid_rows:
         raise HTTPException(400, "没有可导入的有效门店")
     config = body.get("config") or {}
-    radii = sorted(set(int(x) for x in (config.get("radii") or [500,1000,2000])))
+    radii = sorted(set(int(x) for x in (config.get("radii") or [500])))
     categories = [x for x in (config.get("categories") or ["住宅小区","幼儿园","小学"]) if x in CATEGORIES]
     if not radii or len(radii) > 5 or any(x <= 0 or x > 50000 for x in radii):
         raise HTTPException(400, "批量搜索半径需为 1 至 5 个、且不超过 50 公里的正整数")
     if not categories:
         raise HTTPException(400, "请至少选择一个 POI 分类")
     with SessionLocal() as db:
-        job=AnalysisJob(filename=body.get("filename"),status="等待开始匹配",total_stores=len(valid_rows),config={"mapping":mapping,"radii":radii,"categories":categories,"generate_profile":bool(config.get("generate_profile",True))});db.add(job);db.flush()
+        job=AnalysisJob(filename=body.get("filename"),status="等待开始匹配",total_stores=len(valid_rows),config={"mapping":mapping,"radii":radii,"categories":categories,"generate_profile":bool(config.get("generate_profile",True)),"active_stage":"match","control":"idle","stage_total":len(valid_rows),"stage_processed":0,"current_store":""});db.add(job);db.flush()
         for row in valid_rows:
             name = str(row.get(mapping.get("name", ""), "")).strip()
             address = str(row.get(mapping.get("address", ""), "")).strip()
@@ -615,13 +625,68 @@ def get_job(job_id:int):
 
 
 @app.post("/api/analysis-jobs/{job_id}/resume")
-def resume(job_id:int):
+async def resume(job_id:int):
     with SessionLocal() as db:
         job=db.get(AnalysisJob,job_id)
         if not job: raise HTTPException(404,"任务不存在")
-        if job.status == "已取消":
-            job.status = "等待继续匹配"
-        db.commit();return ok(serialize_job(job))
+        config=dict(job.config or {})
+        stage=str(config.get("active_stage") or "match")
+        config["control"]="run";job.config=config
+        job.status="正在匹配门店" if stage=="match" else "正在完整分析"
+        db.commit();payload=serialize_job(job)
+    _schedule_job_runner(job_id,stage)
+    return ok(payload,"任务已继续")
+
+
+@app.post("/api/analysis-jobs/{job_id}/pause")
+def pause_job(job_id:int):
+    with SessionLocal() as db:
+        job=db.get(AnalysisJob,job_id)
+        if not job: raise HTTPException(404,"任务不存在")
+        config=dict(job.config or {});config["control"]="pause";job.config=config;job.status="已暂停"
+        db.commit();return ok(serialize_job(job),"任务将在当前门店处理完成后暂停")
+
+
+@app.post("/api/analysis-jobs/{job_id}/end")
+def end_job(job_id:int):
+    with SessionLocal() as db:
+        job=db.get(AnalysisJob,job_id)
+        if not job: raise HTTPException(404,"任务不存在")
+        config=dict(job.config or {});config["control"]="stop";config["current_store"]="";job.config=config;job.status="已结束"
+        db.commit();return ok(serialize_job(job),"任务已结束，已完成结果将保留")
+
+
+@app.post("/api/analysis-jobs/{job_id}/start-matching")
+async def start_matching_all(job_id:int):
+    with SessionLocal() as db:
+        job=db.get(AnalysisJob,job_id)
+        if not job: raise HTTPException(404,"任务不存在")
+        if job_id in JOB_RUNNERS and not JOB_RUNNERS[job_id].done():
+            return ok(serialize_job(job),"任务已在运行")
+        config=dict(job.config or {});config.update({"active_stage":"match","control":"run","stage_total":job.total_stores,"stage_processed":job.processed_stores,"current_store":"准备开始匹配"});job.config=config;job.status="正在匹配门店"
+        db.commit();payload=serialize_job(job)
+    _schedule_job_runner(job_id,"match")
+    return ok(payload,"已开始连续匹配全部门店")
+
+
+@app.post("/api/analysis-jobs/{job_id}/start-analysis")
+async def start_analysis_all(job_id:int):
+    with SessionLocal() as db:
+        job=db.get(AnalysisJob,job_id)
+        if not job: raise HTTPException(404,"任务不存在")
+        if job_id in JOB_RUNNERS and not JOB_RUNNERS[job_id].done():
+            return ok(serialize_job(job),"任务已在运行")
+        links=db.scalars(select(AnalysisJobStore).where(AnalysisJobStore.analysis_job_id==job_id)).all()
+        analyzable=sum(link.status in {"已确认","已完成","分析完成","分析失败"} for link in links)
+        if not analyzable: raise HTTPException(400,"当前任务没有已匹配门店")
+        for link in links:
+            store=db.get(Store,link.store_id)
+            if store and store.longitude is not None and link.status in {"已确认","已完成","分析完成","分析失败"}:
+                link.status="已确认";link.error_code=None;link.error_message=None
+        config=dict(job.config or {});config.update({"active_stage":"analysis","control":"run","stage_total":analyzable,"stage_processed":0,"current_store":"准备开始完整分析"});job.config=config;job.status="正在完整分析";job.processed_stores=0;job.success_stores=0
+        db.commit();payload=serialize_job(job)
+    _schedule_job_runner(job_id,"analysis")
+    return ok(payload,"已开始连续分析全部门店")
 
 
 @app.post("/api/analysis-jobs/{job_id}/retry")
@@ -696,6 +761,7 @@ def _refresh_match_counts(db, job: AnalysisJob) -> dict[str, int]:
 @app.post("/api/analysis-jobs/{job_id}/match-next")
 async def match_next(job_id:int, body:dict[str,Any]):
     batch_size=max(1,min(50,int(body.get("batch_size") or 10)))
+    auto_select_best=bool(body.get("auto_select_best",False))
     with SessionLocal() as db:
         job=db.get(AnalysisJob,job_id)
         if not job: raise HTTPException(404,"任务不存在")
@@ -733,8 +799,9 @@ async def match_next(job_id:int, body:dict[str,Any]):
                     location=candidate.get("location") or [None,None]
                     if len(location)<2 or location[0] is None or location[1] is None: continue
                     db.add(StoreMatchCandidate(store_id=store.id,amap_poi_id=str(candidate.get("id") or ""),name=str(candidate.get("name") or store.input_name),address=str(candidate.get("address") or ""),longitude=float(location[0]),latitude=float(location[1]),score=int(candidate.get("score") or 0),reasons=list(candidate.get("reasons") or [])))
-                if scored and scored[0].get("auto_confirm"):
-                    _apply_match(store,scored[0],"批量高置信度自动确认");link.status="已确认"
+                if scored and (scored[0].get("auto_confirm") or auto_select_best):
+                    method="批量自动选择最佳候选" if auto_select_best and not scored[0].get("auto_confirm") else "批量高置信度自动确认"
+                    _apply_match(store,scored[0],method);link.status="已确认"
                 elif scored:
                     store.match_status="待人工确认";link.status="待人工确认"
                 else:
@@ -768,6 +835,125 @@ def confirm_matches(job_id:int, body:dict[str,Any]):
         return ok({"confirmed":confirmed,"job":serialize_job(job),**counts},"候选门店已确认")
 
 
+def _schedule_job_runner(job_id:int,stage:str) -> None:
+    active=JOB_RUNNERS.get(job_id)
+    if active and not active.done():
+        return
+    task=asyncio.create_task(_run_match_all_background(job_id) if stage=="match" else _run_analysis_all_background(job_id))
+    JOB_RUNNERS[job_id]=task
+    task.add_done_callback(lambda finished,task_job_id=job_id: JOB_RUNNERS.pop(task_job_id,None) if JOB_RUNNERS.get(task_job_id) is finished else None)
+
+
+def _runtime_control(job_id:int) -> str:
+    with SessionLocal() as db:
+        job=db.get(AnalysisJob,job_id)
+        return str((job.config or {}).get("control") or "run") if job else "stop"
+
+
+def _update_runtime(job_id:int,**updates:Any) -> None:
+    with SessionLocal() as db:
+        job=db.get(AnalysisJob,job_id)
+        if not job:return
+        config=dict(job.config or {});config.update(updates);job.config=config;db.commit()
+
+
+async def _run_match_all_background(job_id:int) -> None:
+    try:
+        with SessionLocal() as db:
+            job=db.get(AnalysisJob,job_id)
+            if not job:return
+            pending=db.scalars(select(AnalysisJobStore).where(AnalysisJobStore.analysis_job_id==job_id,AnalysisJobStore.status=="待人工确认")).all()
+            for link in pending:
+                candidate=db.scalar(select(StoreMatchCandidate).where(StoreMatchCandidate.store_id==link.store_id).order_by(StoreMatchCandidate.score.desc()).limit(1))
+                store=db.get(Store,link.store_id)
+                if candidate and store:
+                    _apply_match(store,{"id":candidate.amap_poi_id,"name":candidate.name,"address":candidate.address,"location":[candidate.longitude,candidate.latitude],"score":candidate.score},"批量自动选择最佳候选")
+                    link.status="已确认"
+                else:
+                    link.status="等待匹配"
+            _refresh_match_counts(db,job);db.commit()
+        while True:
+            control=_runtime_control(job_id)
+            if control in {"pause","stop"}:
+                with SessionLocal() as db:
+                    job=db.get(AnalysisJob,job_id)
+                    if job:job.status="已暂停" if control=="pause" else "已结束";db.commit()
+                return
+            with SessionLocal() as db:
+                job=db.get(AnalysisJob,job_id)
+                if not job:return
+                link=db.scalar(select(AnalysisJobStore).where(AnalysisJobStore.analysis_job_id==job_id,AnalysisJobStore.status.in_(["等待匹配","等待处理"])).order_by(AnalysisJobStore.id).limit(1))
+                if not link:
+                    counts=_refresh_match_counts(db,job)
+                    config=dict(job.config or {});config.update({"control":"idle","stage_processed":job.total_stores,"current_store":""});job.config=config
+                    job.status="匹配部分失败" if counts["failed"] else "匹配完成";db.commit();return
+                store=db.get(Store,link.store_id)
+                config=dict(job.config or {});config.update({"active_stage":"match","control":"run","stage_total":job.total_stores,"current_store":store.input_name if store else ""});job.config=config;job.status="正在匹配门店";db.commit()
+            result=await match_next(job_id,{"batch_size":1,"auto_select_best":True})
+            matched_data=result.get("data") or {}
+            matched_job=matched_data.get("job") or {}
+            _update_runtime(job_id,stage_processed=int(matched_job.get("processed_stores") or 0))
+            await asyncio.sleep(0)
+    except Exception as exc:
+        with SessionLocal() as db:
+            job=db.get(AnalysisJob,job_id)
+            if job:
+                config=dict(job.config or {});config.update({"control":"idle","current_store":""});job.config=config;job.status="任务异常";db.commit()
+        return
+
+
+async def _analyze_background_store(job_id:int,store_id:int,categories:list[str],radii:list[int]) -> dict[str,Any]:
+    poi_status=await _run_batch_poi_analysis(job_id,store_id,categories,radii)
+    await _run_business_analysis(store_id,radii,analysis_job_id=job_id)
+    return poi_status
+
+
+async def _run_analysis_all_background(job_id:int) -> None:
+    any_truncated=False
+    try:
+        while True:
+            control=_runtime_control(job_id)
+            if control in {"pause","stop"}:
+                with SessionLocal() as db:
+                    job=db.get(AnalysisJob,job_id)
+                    if job:job.status="已暂停" if control=="pause" else "已结束";db.commit()
+                return
+            with SessionLocal() as db:
+                job=db.get(AnalysisJob,job_id)
+                if not job:return
+                categories=[value for value in (job.config or {}).get("categories",[]) if value in CATEGORIES] or ["住宅小区","幼儿园","小学"]
+                radii=[int(value) for value in ((job.config or {}).get("radii") or [500])]
+                links=db.scalars(select(AnalysisJobStore).where(AnalysisJobStore.analysis_job_id==job_id,AnalysisJobStore.status=="已确认").order_by(AnalysisJobStore.id).limit(MAX_CONCURRENT_STORES)).all()
+                if not links:
+                    all_links=db.scalars(select(AnalysisJobStore).where(AnalysisJobStore.analysis_job_id==job_id)).all()
+                    success=sum(link.status=="分析完成" for link in all_links);failed=sum(link.status in {"匹配失败","分析失败"} for link in all_links)
+                    config=dict(job.config or {});config.update({"control":"idle","stage_processed":success+sum(link.status=="分析失败" for link in all_links),"current_store":""});job.config=config
+                    job.processed_stores=success+sum(link.status=="分析失败" for link in all_links);job.success_stores=success;job.failed_stores=failed;job.truncated=any_truncated
+                    job.status="部分完成" if failed else "已完成";db.commit();return
+                store_ids=[link.store_id for link in links]
+                names=[db.get(Store,store_id).input_name for store_id in store_ids if db.get(Store,store_id)]
+                config=dict(job.config or {});config.update({"active_stage":"analysis","control":"run","current_store":"、".join(names)});job.config=config;job.status="正在完整分析";db.commit()
+            outcomes=await asyncio.gather(*[_analyze_background_store(job_id,store_id,categories,radii) for store_id in store_ids],return_exceptions=True)
+            with SessionLocal() as db:
+                job=db.get(AnalysisJob,job_id)
+                for store_id,outcome in zip(store_ids,outcomes):
+                    if isinstance(outcome,Exception):
+                        link=db.scalar(select(AnalysisJobStore).where(AnalysisJobStore.analysis_job_id==job_id,AnalysisJobStore.store_id==store_id))
+                        if link:link.status="分析失败";link.error_code=getattr(outcome,"code","ANALYSIS_ERROR");link.error_message=str(outcome)
+                    else:
+                        any_truncated=any_truncated or bool(outcome.get("truncated"))
+                all_links=db.scalars(select(AnalysisJobStore).where(AnalysisJobStore.analysis_job_id==job_id)).all()
+                processed=sum(link.status in {"分析完成","分析失败"} for link in all_links);success=sum(link.status=="分析完成" for link in all_links);failed=sum(link.status in {"匹配失败","分析失败"} for link in all_links)
+                config=dict(job.config or {});config["stage_processed"]=processed;job.config=config;job.processed_stores=processed;job.success_stores=success;job.failed_stores=failed;db.commit()
+            await asyncio.sleep(0)
+    except Exception:
+        with SessionLocal() as db:
+            job=db.get(AnalysisJob,job_id)
+            if job:
+                config=dict(job.config or {});config.update({"control":"idle","current_store":""});job.config=config;job.status="任务异常";db.commit()
+        return
+
+
 @app.post("/api/analysis-jobs/{job_id}/business-district-analysis")
 async def create_batch_business_analysis(job_id: int, body: BusinessAnalysisBody):
     with SessionLocal() as db:
@@ -780,10 +966,17 @@ async def create_batch_business_analysis(job_id: int, body: BusinessAnalysisBody
         pending_count = len(links) - len(store_ids)
         if not store_ids:
             raise HTTPException(400, "当前任务没有已确认坐标的门店，请先完成批量匹配")
+        categories = [value for value in (job.config or {}).get("categories", []) if value in CATEGORIES]
+        if not categories:
+            categories = ["住宅小区", "幼儿园", "小学"]
         job.status = "正在生成商圈画像"; job.processed_stores = 0; db.commit()
-    completed, failed = 0, []
+    completed, failed, warnings = 0, [], []
+    any_truncated = False
     for store_id in store_ids:
         try:
+            poi_status = await _run_batch_poi_analysis(job_id, store_id, categories, body.radii)
+            any_truncated = any_truncated or poi_status["truncated"]
+            warnings.extend({"store_id": store_id, "message": message} for message in poi_status["warnings"])
             await _run_business_analysis(store_id, body.radii, analysis_job_id=job_id)
             completed += 1
         except Exception as exc:
@@ -794,20 +987,180 @@ async def create_batch_business_analysis(job_id: int, body: BusinessAnalysisBody
         job.success_stores = completed
         job.failed_stores = len(failed)
         job.pending_stores = pending_count
+        job.truncated = any_truncated
         job.status = "已完成" if not failed and not pending_count else "部分完成"
         db.commit()
-    return ok({"job_id": job_id, "completed": completed, "failed": failed, "pending": pending_count,"status": "已完成" if not failed and not pending_count else "部分完成"})
+    return ok({"job_id": job_id, "completed": completed, "failed": failed, "warnings": warnings, "pending": pending_count,"status": "已完成" if not failed and not pending_count else "部分完成"})
+
+
+async def _run_batch_poi_analysis(job_id: int, store_id: int, categories: list[str], radii: list[int]) -> dict[str, Any]:
+    """Collect the task-configured POIs for one imported store without mixing historical jobs."""
+    max_radius = max(radii)
+    with SessionLocal() as db:
+        store = db.get(Store, store_id)
+        if not store or store.longitude is None or store.latitude is None:
+            raise HTTPException(400, "请先确认门店位置")
+        existing = db.scalars(select(PoiResult).where(
+            PoiResult.analysis_job_id == job_id,
+            PoiResult.store_id == store_id,
+            PoiResult.poi_category.in_(categories),
+        )).all()
+        completed_categories = {item.poi_category for item in existing}
+        longitude, latitude = store.longitude, store.latitude
+
+    client = AmapClient()
+    collected: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    truncated = False
+    for category in categories:
+        if category in completed_categories:
+            continue
+        try:
+            items, cut = await client.around((longitude, latitude), category, max_radius)
+            truncated = truncated or cut
+            collected.extend({**item, "category": category} for item in items if item["distance"] <= max_radius)
+        except AmapServiceError as exc:
+            warnings.append(f"{category}查询失败：{exc.message}")
+
+    with SessionLocal() as db:
+        for item in deduplicate_pois(collected):
+            exists = db.scalar(select(PoiResult.id).where(
+                PoiResult.analysis_job_id == job_id,
+                PoiResult.store_id == store_id,
+                PoiResult.amap_poi_id == item["id"],
+                PoiResult.poi_category == item["category"],
+            ).limit(1))
+            if exists:
+                continue
+            db.add(PoiResult(
+                analysis_job_id=job_id, store_id=store_id, amap_poi_id=item["id"], parent_poi_id=item.get("parent"),
+                name=item["name"], poi_category=item["category"], poi_type=item.get("type"), poi_typecode=item.get("typecode"),
+                longitude=item["location"][0], latitude=item["location"][1], straight_distance_m=item["distance"],
+                province=item.get("province"), city=item.get("city"), district=item.get("district"), adcode=item.get("adcode"),
+                address=item.get("address"), business_area=item.get("business_area"), distance_bucket=distance_bucket(item["distance"], radii),
+                search_keyword=item["category"] if item["category"] == "竞品门店" else None,
+                search_typecodes=CATEGORIES.get(item["category"], ("", ""))[0], search_radius=max_radius,
+            ))
+        db.commit()
+    return {"truncated": truncated, "warnings": warnings}
+
+
+def _job_poi_rows(db, job: AnalysisJob, store_id: int) -> list[PoiResult]:
+    categories = [value for value in (job.config or {}).get("categories", []) if value in CATEGORIES]
+    query = select(PoiResult).where(
+        PoiResult.analysis_job_id == job.id,
+        PoiResult.store_id == store_id,
+        PoiResult.excluded == False,
+    )
+    if categories:
+        query = query.where(PoiResult.poi_category.in_(categories))
+    return list(db.scalars(query.order_by(PoiResult.straight_distance_m)).all())
+
+
+def _summarize_pois(items: list[PoiResult]) -> dict[str, Any]:
+    by_category: dict[str, int] = {}
+    by_distance: dict[str, int] = {}
+    for item in items:
+        by_category[item.poi_category] = by_category.get(item.poi_category, 0) + 1
+        by_distance[item.distance_bucket] = by_distance.get(item.distance_bucket, 0) + 1
+    return {"total": len(items), "by_category": by_category, "by_distance": by_distance}
+
+
+@app.get("/api/analysis-jobs/{job_id}/stores")
+def get_batch_job_stores(job_id: int):
+    with SessionLocal() as db:
+        job = db.get(AnalysisJob, job_id)
+        if not job:
+            raise HTTPException(404, "任务不存在")
+        links = db.scalars(select(AnalysisJobStore).where(AnalysisJobStore.analysis_job_id == job_id).order_by(AnalysisJobStore.id)).all()
+        result = []
+        for link in links:
+            store = db.get(Store, link.store_id)
+            if not store:
+                continue
+            items = _job_poi_rows(db, job, store.id)
+            analysis = db.scalar(select(BusinessDistrictAnalysis).where(
+                BusinessDistrictAnalysis.analysis_job_id == job_id,
+                BusinessDistrictAnalysis.store_id == store.id,
+            ).order_by(BusinessDistrictAnalysis.created_at.desc()).limit(1))
+            result.append({"store": serialize_store(store), "status": link.status, "poi_summary": _summarize_pois(items), "has_profile": analysis is not None, "error_message": link.error_message})
+        return ok(result)
+
+
+@app.get("/api/analysis-jobs/{job_id}/stores/{store_id}")
+def get_batch_store_detail(job_id: int, store_id: int):
+    with SessionLocal() as db:
+        job = db.get(AnalysisJob, job_id)
+        link = db.scalar(select(AnalysisJobStore).where(AnalysisJobStore.analysis_job_id == job_id, AnalysisJobStore.store_id == store_id))
+        store = db.get(Store, store_id)
+        if not job or not link or not store:
+            raise HTTPException(404, "任务中的门店不存在")
+        items = _job_poi_rows(db, job, store_id)
+        analysis = db.scalar(select(BusinessDistrictAnalysis).where(
+            BusinessDistrictAnalysis.analysis_job_id == job_id,
+            BusinessDistrictAnalysis.store_id == store_id,
+        ).order_by(BusinessDistrictAnalysis.created_at.desc()).limit(1))
+        return ok({
+            "job": serialize_job(job), "store": serialize_store(store), "status": link.status,
+            "pois": [serialize_poi(item) for item in items], "poi_summary": _summarize_pois(items),
+            "analysis": _serialize_business_analysis(analysis) if analysis else None,
+            "disclaimer": "POI 与画像均限定在本批量任务内；潜在人群和消费环境属于周边设施代理推断，不代表真实人口或销售数据。",
+        })
 
 
 @app.get("/api/analysis-jobs/{job_id}/business-district-results")
 def get_batch_business_results(job_id: int):
     with SessionLocal() as db:
-        items = db.scalars(select(BusinessDistrictAnalysis).where(BusinessDistrictAnalysis.analysis_job_id == job_id).order_by(BusinessDistrictAnalysis.fit_score.desc())).all()
+        job = db.get(AnalysisJob, job_id)
+        if not job:
+            raise HTTPException(404, "任务不存在")
+        items = db.scalars(select(BusinessDistrictAnalysis).where(BusinessDistrictAnalysis.analysis_job_id == job_id).order_by(BusinessDistrictAnalysis.created_at.desc())).all()
         result = []
+        seen: set[int] = set()
         for item in items:
+            if item.store_id in seen:
+                continue
+            seen.add(item.store_id)
             store = db.get(Store, item.store_id)
-            result.append({**_serialize_business_analysis(item), "store": serialize_store(store) if store else None})
+            pois = _job_poi_rows(db, job, item.store_id)
+            result.append({**_serialize_business_analysis(item), "store": serialize_store(store) if store else None, "poi_summary": _summarize_pois(pois)})
+        result.sort(key=lambda value: value["fit"]["score"], reverse=True)
         return ok(result)
+
+
+@app.get("/api/analysis-jobs/{job_id}/stores/{store_id}/export")
+def export_batch_store(job_id: int, store_id: int):
+    with SessionLocal() as db:
+        job = db.get(AnalysisJob, job_id)
+        link = db.scalar(select(AnalysisJobStore).where(AnalysisJobStore.analysis_job_id == job_id, AnalysisJobStore.store_id == store_id))
+        store = db.get(Store, store_id)
+        if not job or not link or not store:
+            raise HTTPException(404, "任务中的门店不存在")
+        pois = _job_poi_rows(db, job, store_id)
+        analysis = db.scalar(select(BusinessDistrictAnalysis).where(
+            BusinessDistrictAnalysis.analysis_job_id == job_id,
+            BusinessDistrictAnalysis.store_id == store_id,
+        ).order_by(BusinessDistrictAnalysis.created_at.desc()).limit(1))
+    wb = Workbook(); overview = wb.active; overview.title = "门店概览"
+    overview.append(["项目", "内容"])
+    for label, value in [
+        ("任务编号", job_id), ("门店编号", store.user_code), ("输入门店名称", store.input_name), ("高德标准门店名称", store.standard_name),
+        ("匹配状态", store.match_status), ("匹配分", store.match_score), ("城市", store.city), ("区县", store.district),
+        ("地址", store.address), ("经度", store.longitude), ("纬度", store.latitude), ("任务状态", link.status),
+        ("POI总数", len(pois)), ("搜索半径", str((job.config or {}).get("radii", []))), ("POI分类", "、".join((job.config or {}).get("categories", []))),
+        ("数据说明", "潜在人群和消费环境属于周边设施代理推断，不代表真实人口、客流或销售数据。"),
+    ]:
+        overview.append([label, safe_excel(value)])
+    style_sheet(overview)
+    details = wb.create_sheet("POI明细")
+    details.append(["POI分类", "POI名称", "类型", "地址", "直线距离", "距离分层", "经度", "纬度", "高德POI ID"])
+    for item in pois:
+        details.append([safe_excel(value) for value in [item.poi_category, item.name, item.poi_type, item.address, item.straight_distance_m, item.distance_bucket, item.longitude, item.latitude, item.amap_poi_id]])
+    style_sheet(details)
+    if analysis:
+        append_business_sheets(wb, [analysis], {store.id: store})
+    buf = io.BytesIO(); wb.save(buf); buf.seek(0)
+    return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f"attachment; filename=batch_store_{job_id}_{store_id}.xlsx"})
 
 
 @app.get("/api/analysis-jobs/{job_id}/export")
@@ -931,7 +1284,16 @@ def serialize_poi(p:PoiResult):
 
 
 def serialize_job(j:AnalysisJob):
-    return {"id":j.id,"filename":j.filename,"status":j.status,"total_stores":j.total_stores,"processed_stores":j.processed_stores,"matched_stores":j.matched_stores,"pending_stores":j.pending_stores,"success_stores":j.success_stores,"failed_stores":j.failed_stores,"truncated":j.truncated,"config":j.config or {},"created_at":j.created_at.isoformat(),"updated_at":j.updated_at.isoformat()}
+    config=j.config or {}
+    stage=str(config.get("active_stage") or ("analysis" if j.success_stores else "match"))
+    stage_total=int(config.get("stage_total") or (j.matched_stores if stage=="analysis" and j.matched_stores else j.total_stores) or 0)
+    if "stage_processed" in config:
+        stage_processed=int(config.get("stage_processed") or 0)
+    elif stage=="analysis":
+        stage_processed=int(j.processed_stores or (j.success_stores+j.failed_stores))
+    else:
+        stage_processed=int(j.processed_stores or 0)
+    return {"id":j.id,"filename":j.filename,"status":j.status,"total_stores":j.total_stores,"processed_stores":j.processed_stores,"matched_stores":j.matched_stores,"pending_stores":j.pending_stores,"success_stores":j.success_stores,"failed_stores":j.failed_stores,"truncated":j.truncated,"config":config,"stage":stage,"control":config.get("control") or "idle","stage_total":stage_total,"stage_processed":stage_processed,"progress_percent":round(stage_processed/max(1,stage_total)*100),"current_store":config.get("current_store") or "","created_at":j.created_at.isoformat(),"updated_at":j.updated_at.isoformat()}
 
 
 def style_sheet(ws):

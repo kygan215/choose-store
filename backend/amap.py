@@ -4,6 +4,7 @@ import asyncio
 import os
 import random
 import re
+import time
 from typing import Any
 
 import httpx
@@ -19,6 +20,20 @@ CATEGORIES = {
 }
 CATEGORIES.update({name: (config["types"], config["keywords"]) for name, config in FEATURE_PACK.items()})
 
+_LIMITER_LOOP: asyncio.AbstractEventLoop | None = None
+_LIMITER_LOCK: asyncio.Lock | None = None
+_LAST_REQUEST_AT = 0.0
+
+
+def _request_limiter() -> asyncio.Lock:
+    global _LIMITER_LOOP, _LIMITER_LOCK, _LAST_REQUEST_AT
+    loop = asyncio.get_running_loop()
+    if _LIMITER_LOOP is not loop or _LIMITER_LOCK is None:
+        _LIMITER_LOOP = loop
+        _LIMITER_LOCK = asyncio.Lock()
+        _LAST_REQUEST_AT = 0.0
+    return _LIMITER_LOCK
+
 
 class AmapClient:
     def __init__(self) -> None:
@@ -28,12 +43,18 @@ class AmapClient:
         if self.base != "https://restapi.amap.com":
             raise RuntimeError("AMAP_API_BASE_URL 仅允许高德官方域名")
         self.timeout = float(os.getenv("AMAP_REQUEST_TIMEOUT", "15"))
-        self.interval = int(os.getenv("AMAP_REQUEST_INTERVAL_MS", "300")) / 1000
+        self.interval = int(os.getenv("AMAP_REQUEST_INTERVAL_MS", "400")) / 1000
 
     async def _get(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
+        global _LAST_REQUEST_AT
         safe = {k: v for k, v in params.items() if k != "key"}
         for attempt in range(3):
             try:
+                async with _request_limiter():
+                    delay = self.interval - (time.monotonic() - _LAST_REQUEST_AT)
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    _LAST_REQUEST_AT = time.monotonic()
                 async with httpx.AsyncClient(timeout=self.timeout) as client:
                     response = await client.get(self.base + path, params={**params, "key": self.key})
                     response.raise_for_status()
@@ -44,7 +65,6 @@ class AmapClient:
                         await asyncio.sleep((attempt + 1) * .8)
                         continue
                     raise AmapServiceError(code, message)
-                await asyncio.sleep(self.interval)
                 return data
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
                 if attempt == 2:
