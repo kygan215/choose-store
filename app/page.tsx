@@ -17,9 +17,15 @@ type Poi = {
 };
 type ImportPreview = {
   filename: string; headers: string[]; mapping: Record<string,string>;
-  rows: Array<Record<string,string>>; all_rows: Array<Record<string,string>>;
-  total_rows: number; warnings: string[];
+  rows: Array<Record<string,string|number|boolean|string[]>>; all_rows: Array<Record<string,string>>;
+  total_rows: number; valid_rows:number; invalid_rows:number; duplicate_rows:number; warnings: string[];
 };
+type JobRecord = {
+  id:number;filename?:string;status:string;total_stores:number;processed_stores:number;matched_stores:number;
+  pending_stores:number;success_stores:number;failed_stores:number;created_at:string;updated_at:string;
+  config?:{radii?:number[];categories?:string[];generate_profile?:boolean};
+};
+type PendingMatch = {store:Record<string,unknown>;candidates:Array<{id:number;amap_poi_id:string;name:string;address:string;location:[number,number];score:number;reasons:string[]}>};
 type BusinessAnalysis = {
   id:number; analysis_version:string; radius_config:number[]; confidence_level:string;
   business_area:{name:string;source:string;confidence:string};
@@ -48,6 +54,10 @@ const API = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000/api";
 const allCategories = ["住宅小区", "幼儿园", "小学", "购物中心", "超市", "便利店", "医院", "药店", "公园", "地铁站", "公交站", "竞品门店"];
 const defaultCategories = ["住宅小区", "小学", "幼儿园"];
 const defaultRadii = [500,1000,2000];
+const importFields = [
+  ["name","门店名称"],["province","省份"],["city","城市"],["district","区县"],
+  ["address","详细地址"],["code","门店编号"],["brand","品牌"],["remark","备注"],
+] as const;
 const formatRadius = (value:number) => value >= 1000 ? `${Number((value/1000).toFixed(2))} 公里` : `${value} 米`;
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -76,6 +86,9 @@ export default function Page() {
   const [drag, setDrag] = useState(false);
   const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
   const [batchJob, setBatchJob] = useState<{job_id:number;status:string}|null>(null);
+  const [batchCategories,setBatchCategories] = useState<string[]>(defaultCategories);
+  const [batchRadii,setBatchRadii] = useState<number[]>(defaultRadii);
+  const [batchProfile,setBatchProfile] = useState(true);
   const [resultTab,setResultTab] = useState<"distribution"|"profile"|"audience"|"details">("distribution");
   const [business,setBusiness] = useState<BusinessAnalysis|null>(null);
 
@@ -177,7 +190,7 @@ export default function Page() {
     try {
       const data = await request<{job_id:number;status:string}>("/import/confirm",{
         method:"POST",
-        body:JSON.stringify({filename:importPreview.filename,mapping:importPreview.mapping,rows:importPreview.all_rows}),
+        body:JSON.stringify({filename:importPreview.filename,mapping:importPreview.mapping,rows:importPreview.all_rows,config:{categories:batchCategories,radii:batchRadii,generate_profile:batchProfile}}),
       });
       setBatchJob(data);
     } catch (e) {
@@ -185,6 +198,15 @@ export default function Page() {
     } finally {
       setBusy("");
     }
+  }
+
+  function updateImportMapping(field:string,header:string) {
+    if(!importPreview) return;
+    const mapping={...importPreview.mapping};
+    for(const key of Object.keys(mapping)) if(mapping[key]===header) delete mapping[key];
+    if(header) mapping[field]=header; else delete mapping[field];
+    setImportPreview({...importPreview,mapping});
+    setBatchJob(null);
   }
 
   return (
@@ -269,20 +291,22 @@ export default function Page() {
           {importPreview && <div className="import-result">
             <div className="import-summary">
               <div><small>文件</small><b>{importPreview.filename}</b></div>
-              <div><small>识别数据</small><b>{importPreview.total_rows} 行</b></div>
+              <div><small>可导入数据</small><b>{importPreview.valid_rows} / {importPreview.total_rows} 行</b></div>
               <div><small>字段映射</small><b>{Object.keys(importPreview.mapping).length} 项</b></div>
               <span className="success-badge">解析成功</span>
             </div>
-            <div className="mapping-block"><h3>字段映射</h3><div className="mapping-list">
-              {Object.entries(importPreview.mapping).map(([field,header])=><span key={field}><b>{header}</b><i>→</i>{({name:"门店名称",province:"省份",city:"城市",district:"区县",address:"详细地址",code:"门店编号",brand:"品牌",remark:"备注"} as Record<string,string>)[field]||field}</span>)}
+            {importPreview.warnings.length>0&&<div className="import-warnings">{importPreview.warnings.map(x=><p key={x}>⚠ {x}</p>)}</div>}
+            <div className="mapping-block"><h3>确认字段映射 <small>门店名称和详细地址至少映射一项</small></h3><div className="mapping-selects">
+              {importFields.map(([field,label])=><label key={field}><span>{label}{field==="name"||field==="address"?<em> *</em>:null}</span><select value={importPreview.mapping[field]||""} onChange={e=>updateImportMapping(field,e.target.value)}><option value="">不导入</option>{importPreview.headers.map(header=><option key={header} value={header}>{header}</option>)}</select></label>)}
             </div></div>
+            <div className="batch-config"><div><h3>统一搜索半径</h3><div className="chips">{[500,1000,2000,3000,5000].map(radius=><button key={radius} className={batchRadii.includes(radius)?"on":""} onClick={()=>setBatchRadii(batchRadii.includes(radius)?batchRadii.filter(x=>x!==radius):[...batchRadii,radius].sort((a,b)=>a-b))}>{formatRadius(radius)}</button>)}</div></div><div><h3>统一 POI 分类 <small>已选 {batchCategories.length} 项</small></h3><div className="category-grid">{allCategories.map(category=><label key={category}><input type="checkbox" checked={batchCategories.includes(category)} onChange={()=>setBatchCategories(batchCategories.includes(category)?batchCategories.filter(x=>x!==category):[...batchCategories,category])}/><span>{category}</span></label>)}</div></div><label className="profile-toggle"><input type="checkbox" checked={batchProfile} onChange={e=>setBatchProfile(e.target.checked)}/><span><b>匹配后生成智能画像</b><small>包含商圈、潜在人群、消费环境和商场线索</small></span></label></div>
             <div className="preview-head"><div><h3>数据预览</h3><p>显示前 {Math.min(20,importPreview.rows.length)} 行，共 {importPreview.total_rows} 行</p></div>
-              <button className="primary" disabled={!!busy||!!batchJob} onClick={createBatchJob}>{busy==="confirm-import"?"正在创建任务…":batchJob?"任务已创建":"确认字段并创建任务"}</button>
+              <button className="primary" disabled={!!busy||!!batchJob||(!importPreview.mapping.name&&!importPreview.mapping.address)||!batchRadii.length||!batchCategories.length} onClick={createBatchJob}>{busy==="confirm-import"?"正在创建任务…":batchJob?"任务已创建":"创建批量任务"}</button>
             </div>
             <div className="table-wrap import-table"><table><thead><tr>{importPreview.headers.map(h=><th key={h}>{h}</th>)}</tr></thead>
-              <tbody>{importPreview.rows.map((row,index)=><tr key={index}>{importPreview.headers.map(h=><td key={h}>{row[h]||""}</td>)}</tr>)}</tbody>
+              <tbody>{importPreview.rows.map((row,index)=><tr key={index} className={row._valid===false?"invalid-row":""}>{importPreview.headers.map(h=><td key={h}>{String(row[h]||"")}</td>)}</tr>)}</tbody>
             </table></div>
-            {batchJob && <div className="job-created"><b>批量任务 #{batchJob.job_id} 已创建</b><span>当前状态：{batchJob.status}。可前往“分析任务”查看。</span></div>}
+            {batchJob && <div className="job-created"><div><b>批量任务 #{batchJob.job_id} 已创建</b><span>下一步开始高德匹配；低可信度门店会要求人工确认。</span></div><button className="primary" onClick={()=>setTab("jobs")}>前往任务处理</button></div>}
           </div>}
           <div className="flow"><b>批量流程</b><span>上传文件</span><i>→</i><span>确认字段</span><i>→</i><span>候选匹配</span><i>→</i><span>人工确认</span><i>→</i><span>POI 查询</span><i>→</i><span>导出结果</span></div>
         </section>}
@@ -294,21 +318,33 @@ export default function Page() {
 }
 
 function Jobs({api}:{api:string}) {
-  const [jobs,setJobs]=useState<Array<Record<string,number|string>>>([]);
+  const [jobs,setJobs]=useState<JobRecord[]>([]);
   const [results,setResults]=useState<Array<BusinessAnalysis&{store:Record<string,unknown>}>>([]);
   const [activeJob,setActiveJob]=useState<number|null>(null);
+  const [matchJob,setMatchJob]=useState<number|null>(null);
+  const [pendingMatches,setPendingMatches]=useState<PendingMatch[]>([]);
+  const [selections,setSelections]=useState<Record<number,number>>({});
   const [jobBusy,setJobBusy]=useState("");
+  const [notice,setNotice]=useState("");
   const [filters,setFilters]=useState({city:"",district:"",type:"",level:"",lowConfidence:false});
-  useEffect(()=>{fetch(`${api}/analysis-jobs`).then(r=>r.json()).then(b=>setJobs(b.data||[])).catch(()=>{})},[api]);
-  async function loadResults(id:number){setActiveJob(id);setJobBusy("load");try{const r=await fetch(`${api}/analysis-jobs/${id}/business-district-results`);const b=await r.json();setResults(b.data||[])}finally{setJobBusy("")}}
-  async function generate(id:number){setJobBusy("generate");try{await fetch(`${api}/analysis-jobs/${id}/business-district-analysis`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({radii:[500,1000,2000]})});await loadResults(id)}finally{setJobBusy("")}}
+  async function apiRequest(path:string,init?:RequestInit){const response=await fetch(`${api}${path}`,{...init,headers:{"Content-Type":"application/json",...(init?.headers||{})}});const body=await response.json();if(!response.ok||!body.success)throw new Error(body.message||"操作失败");return body.data}
+  async function loadJobs(){try{setJobs(await apiRequest("/analysis-jobs"))}catch(e){setNotice(e instanceof Error?e.message:"任务加载失败")}}
+  useEffect(()=>{let active=true;const refresh=()=>{fetch(`${api}/analysis-jobs`).then(response=>response.json()).then(body=>{if(active)setJobs(body.data||[])}).catch(()=>{})};refresh();const timer=window.setInterval(refresh,4000);return()=>{active=false;window.clearInterval(timer)}},[api]);
+  async function loadResults(id:number){setActiveJob(id);setJobBusy("load");setNotice("");try{setResults(await apiRequest(`/analysis-jobs/${id}/business-district-results`))}catch(e){setNotice(e instanceof Error?e.message:"结果加载失败")}finally{setJobBusy("")}}
+  async function runMatching(id:number){setJobBusy(`match-${id}`);setNotice("");try{const data=await apiRequest(`/analysis-jobs/${id}/match-next`,{method:"POST",body:JSON.stringify({batch_size:10})});setNotice(data.remaining?`本轮已处理 10 家，仍有 ${data.remaining} 家待匹配，可继续执行。`:`门店匹配完成：自动确认 ${data.matched} 家，待人工确认 ${data.pending} 家。`);await loadJobs();if(data.pending)await loadPending(id)}catch(e){setNotice(e instanceof Error?e.message:"匹配失败")}finally{setJobBusy("")}}
+  async function loadPending(id:number){setMatchJob(id);setJobBusy(`pending-${id}`);setNotice("");try{setPendingMatches(await apiRequest(`/analysis-jobs/${id}/pending-matches`));setSelections({})}catch(e){setNotice(e instanceof Error?e.message:"候选加载失败")}finally{setJobBusy("")}}
+  async function confirmSelections(){if(!matchJob)return;const payload=Object.entries(selections).map(([store_id,candidate_id])=>({store_id:Number(store_id),candidate_id}));if(!payload.length)return setNotice("请至少为一家门店选择候选位置");setJobBusy("confirm-matches");try{const data=await apiRequest(`/analysis-jobs/${matchJob}/confirm-matches`,{method:"POST",body:JSON.stringify({selections:payload})});setNotice(`已确认 ${data.confirmed} 家门店`);await loadPending(matchJob);await loadJobs()}catch(e){setNotice(e instanceof Error?e.message:"确认失败")}finally{setJobBusy("")}}
+  async function generate(job:JobRecord){setJobBusy(`generate-${job.id}`);setNotice("");try{const radii=job.config?.radii?.length?job.config.radii:[500,1000,2000];await apiRequest(`/analysis-jobs/${job.id}/business-district-analysis`,{method:"POST",body:JSON.stringify({radii})});await loadJobs();await loadResults(job.id);setNotice("批量智能画像已生成，可查看对比或导出 Excel。") }catch(e){setNotice(e instanceof Error?e.message:"批量画像生成失败")}finally{setJobBusy("")}}
+  async function action(id:number,name:"retry"|"cancel"|"resume"){setJobBusy(`${name}-${id}`);try{await apiRequest(`/analysis-jobs/${id}/${name}`,{method:"POST",body:"{}"});await loadJobs()}catch(e){setNotice(e instanceof Error?e.message:"操作失败")}finally{setJobBusy("")}}
   const visible=results.filter(x=>(!filters.city||x.store?.city===filters.city)&&(!filters.district||x.store?.district===filters.district)&&(!filters.type||x.business_district_type.type===filters.type)&&(!filters.level||x.level.level===filters.level)&&(!filters.lowConfidence||x.confidence_level==="低"));
   return <section className="panel jobs"><div className="section-title"><span>●</span><div><h2>最近分析任务</h2><p>刷新页面后进度仍会保留</p></div></div>
+    {notice&&<div className="job-notice">{notice}</div>}
     {jobs.length===0?<div className="empty"><b>暂无分析任务</b><p>完成一次单门店分析或批量导入后，任务会显示在这里。</p></div>:
-    <table><thead><tr><th>任务</th><th>状态</th><th>门店数</th><th>进度</th><th>创建时间</th><th>操作</th></tr></thead><tbody>{jobs.map(j=><tr key={j.id}><td>分析任务 #{j.id}</td><td><span className="tag">{j.status}</span></td><td>{j.total_stores}</td><td><progress value={Number(j.processed_stores)} max={Number(j.total_stores)||1}/></td><td>{String(j.created_at).slice(0,16).replace("T"," ")}</td><td className="row-actions"><a href={`${api}/analysis-jobs/${j.id}/export`}>导出</a><button onClick={()=>loadResults(Number(j.id))}>商圈对比</button><button disabled={!!jobBusy} onClick={()=>generate(Number(j.id))}>生成商圈</button></td></tr>)}</tbody></table>}
-    {activeJob&&<div className="batch-compare"><div className="panel-head"><div><h2>任务 #{activeJob} 商圈对比</h2><p>共 {visible.length} 个结果；高适配 {visible.filter(x=>x.fit.score>=85).length} 个；高竞争 {visible.filter(x=>x.competition.level==="高").length} 个</p></div><a className="download" href={`${api}/analysis-jobs/${activeJob}/business-district-export`}>导出商圈 Excel</a></div>
+    <div className="table-wrap jobs-table"><table><thead><tr><th>任务</th><th>状态</th><th>门店</th><th>匹配进度</th><th>待确认</th><th>失败</th><th>创建时间</th><th>操作</th></tr></thead><tbody>{jobs.map(job=><tr key={job.id}><td><b>任务 #{job.id}</b><small>{job.filename||"单门店任务"}</small></td><td><span className="tag">{job.status}</span></td><td>{job.matched_stores}/{job.total_stores}</td><td><progress value={job.processed_stores} max={job.total_stores||1}/></td><td>{job.pending_stores}</td><td>{job.failed_stores}</td><td>{job.created_at.slice(0,16).replace("T"," ")}</td><td className="row-actions">{(["等待开始匹配","等待继续匹配","匹配部分失败"].includes(job.status)||(job.pending_stores>0&&job.matched_stores===0))&&<button disabled={!!jobBusy} onClick={()=>runMatching(job.id)}>{jobBusy===`match-${job.id}`?"匹配中…":"开始/继续匹配"}</button>}{job.pending_stores>0&&job.matched_stores>0&&<button disabled={!!jobBusy} onClick={()=>loadPending(job.id)}>处理候选</button>}{job.matched_stores>0&&job.config?.generate_profile!==false&&<button disabled={!!jobBusy} onClick={()=>generate(job)}>{jobBusy===`generate-${job.id}`?"分析中…":"生成智能画像"}</button>}<button onClick={()=>loadResults(job.id)}>查看对比</button><a href={`${api}/analysis-jobs/${job.id}/export`}>导出</a>{job.failed_stores>0&&<button disabled={!!jobBusy} onClick={()=>action(job.id,"retry")}>重试失败</button>}{job.status==="正在匹配门店"&&<button disabled={!!jobBusy} onClick={()=>action(job.id,"cancel")}>取消</button>}</td></tr>)}</tbody></table></div>}
+    {matchJob&&<div className="pending-panel"><div className="panel-head"><div><h2>任务 #{matchJob} 待确认门店</h2><p>逐家核对高德候选，未选择的门店会保留到下次处理。</p></div><button className="primary" disabled={jobBusy==="confirm-matches"||!Object.keys(selections).length} onClick={confirmSelections}>{jobBusy==="confirm-matches"?"正在保存…":`确认已选 ${Object.keys(selections).length} 家`}</button></div>{pendingMatches.length===0?<p>没有待人工确认的门店。</p>:pendingMatches.map(item=><div className="pending-store" key={String(item.store.id)}><div className="pending-store-head"><b>{String(item.store.input_name||"")}</b><span>{String(item.store.city||"")} · {String(item.store.district||"")}　{String(item.store.address||"")}</span></div><div className="pending-candidates">{item.candidates.map(candidate=><button key={candidate.id} className={selections[Number(item.store.id)]===candidate.id?"chosen":""} onClick={()=>setSelections({...selections,[Number(item.store.id)]:candidate.id})}><span><b>{candidate.name}</b><small>{candidate.address}</small></span><strong>{candidate.score}<small>匹配分</small></strong></button>)}</div></div>)}</div>}
+    {activeJob&&<div className="batch-compare"><div className="panel-head"><div><h2>任务 #{activeJob} 智能画像对比</h2><p>共 {visible.length} 个已生成结果，可按城市、商圈类型和可信度筛选。</p></div><a className="download" href={`${api}/analysis-jobs/${activeJob}/business-district-export`}>导出画像 Excel</a></div>
       <div className="compare-filters"><input placeholder="城市" value={filters.city} onChange={e=>setFilters({...filters,city:e.target.value})}/><input placeholder="区县" value={filters.district} onChange={e=>setFilters({...filters,district:e.target.value})}/><select value={filters.type} onChange={e=>setFilters({...filters,type:e.target.value})}><option value="">全部商圈类型</option>{[...new Set(results.map(x=>x.business_district_type.type))].map(x=><option key={x}>{x}</option>)}</select><select value={filters.level} onChange={e=>setFilters({...filters,level:e.target.value})}><option value="">全部能级</option>{["S","A","B","C","D"].map(x=><option key={x}>{x}</option>)}</select><label><input type="checkbox" checked={filters.lowConfidence} onChange={e=>setFilters({...filters,lowConfidence:e.target.checked})}/>只看低可信度</label></div>
-      {jobBusy==="load"?<p>正在加载…</p>:<div className="table-wrap"><table><thead><tr><th>门店</th><th>城市</th><th>区县</th><th>商圈名称</th><th>类型</th><th>能级</th><th>适配度</th><th>竞争压力</th><th>可信度</th></tr></thead><tbody>{visible.sort((a,b)=>b.fit.score-a.fit.score).map(x=><tr key={x.id}><td>{String(x.store?.input_name||"")}</td><td>{String(x.store?.city||"")}</td><td>{String(x.store?.district||"")}</td><td>{x.business_area.name}</td><td>{x.business_district_type.type}</td><td>{x.level.level} · {x.level.score}</td><td>{x.fit.score}</td><td>{x.competition.level}</td><td>{x.confidence_level}</td></tr>)}</tbody></table></div>}
+      {jobBusy==="load"?<p>正在加载…</p>:<div className="table-wrap"><table><thead><tr><th>门店</th><th>城市/区县</th><th>商圈类型</th><th>主要潜在人群</th><th>消费环境</th><th>商场线索</th><th>可信度</th></tr></thead><tbody>{visible.map(x=><tr key={x.id}><td>{String(x.store?.input_name||"")}</td><td>{String(x.store?.city||"")} · {String(x.store?.district||"")}</td><td>{x.business_district_type.type}</td><td>{x.audience_profile?.primary_groups?.map(group=>group.label).join(" + ")||"旧结果需重新生成"}</td><td>{x.audience_profile?.consumption_power?.level||"—"}</td><td>{x.audience_profile?.mall_profile?.level||"—"}</td><td>{x.confidence_level}</td></tr>)}</tbody></table></div>}
     </div>}
   </section>
 }

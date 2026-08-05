@@ -63,6 +63,42 @@ def test_import_preview_and_errors():
         assert r.status_code == 200 and r.json()["data"]["mapping"]["address"] == "详细地址"
 
 
+def test_batch_import_matching_confirmation_and_profile_flow():
+    with TestClient(app) as client:
+        rows = [
+            {"门店名称":"零食很忙武汉南湖店","城市":"武汉市","区县":"洪山区","详细地址":""},
+            {"门店名称":"零食很忙武汉光谷店","城市":"武汉市","区县":"洪山区","详细地址":""},
+        ]
+        created = client.post("/api/import/confirm", json={
+            "filename":"batch.csv",
+            "mapping":{"name":"门店名称","city":"城市","district":"区县","address":"详细地址"},
+            "rows":rows,
+            "config":{"radii":[500,1000],"categories":["住宅小区","幼儿园","小学"],"generate_profile":True},
+        })
+        assert created.status_code == 200
+        job_id = created.json()["data"]["job_id"]
+        job = client.get(f"/api/analysis-jobs/{job_id}").json()["data"]
+        assert job["status"] == "等待开始匹配"
+        assert job["config"]["radii"] == [500,1000]
+
+        matched = client.post(f"/api/analysis-jobs/{job_id}/match-next", json={"batch_size":10})
+        assert matched.status_code == 200
+        match_data = matched.json()["data"]
+        if match_data["pending"]:
+            pending = client.get(f"/api/analysis-jobs/{job_id}/pending-matches").json()["data"]
+            selections = [
+                {"store_id":item["store"]["id"],"candidate_id":item["candidates"][0]["id"]}
+                for item in pending if item["candidates"]
+            ]
+            confirmed = client.post(f"/api/analysis-jobs/{job_id}/confirm-matches", json={"selections":selections})
+            assert confirmed.status_code == 200
+        profile = client.post(f"/api/analysis-jobs/{job_id}/business-district-analysis", json={"radii":[500,1000]})
+        assert profile.status_code == 200
+        results = client.get(f"/api/analysis-jobs/{job_id}/business-district-results").json()["data"]
+        assert len(results) == 2
+        assert all(item["audience_profile"] for item in results)
+
+
 def test_address_geocode_and_config_roundtrip():
     with TestClient(app) as client:
         matched = client.post(

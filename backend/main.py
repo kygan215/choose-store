@@ -20,9 +20,9 @@ from sqlalchemy import select
 from .amap import AmapClient, AmapServiceError, CATEGORIES
 from .business_district import DISCLAIMER, FEATURE_PACK, analyze_business_district, public_config
 from .core import confidence_status, deduplicate_pois, distance_bucket, evaluate_candidate, haversine_m, map_headers, safe_excel
-from .database import AnalysisJob, AnalysisJobStore, AuditLog, BusinessDistrictAnalysis, BusinessDistrictConfig, PoiCategory, PoiResult, SearchRequestLog, SessionLocal, Store, init_db
+from .database import AnalysisJob, AnalysisJobStore, AuditLog, BusinessDistrictAnalysis, BusinessDistrictConfig, PoiCategory, PoiResult, SearchRequestLog, SessionLocal, Store, StoreMatchCandidate, init_db
 
-app = FastAPI(title="门店周边 POI 搜索与分析平台", version="1.1.0")
+app = FastAPI(title="门店周边 POI 搜索与分析平台", version="1.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -449,7 +449,7 @@ async def _run_business_analysis(store_id: int, radii: list[int], analysis_job_i
             job.truncated = truncated
         link = db.scalar(select(AnalysisJobStore).where(AnalysisJobStore.analysis_job_id == analysis_job_id, AnalysisJobStore.store_id == store_id))
         if link:
-            link.status = "已完成" if not failures else "部分完成"
+            link.status = "分析完成" if not failures else "分析失败"
             link.error_message = "；".join(failures) or None
         db.commit(); db.refresh(record)
         return record
@@ -500,6 +500,31 @@ def update_business_config(body: dict[str, Any]):
 MAX_UPLOAD = 15 * 1024 * 1024
 
 
+def _validate_import_rows(rows: list[dict[str, Any]], mapping: dict[str, str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
+    valid, preview, duplicate_count = [], [], 0
+    seen: set[tuple[str, ...]] = set()
+    for index, row in enumerate(rows, start=2):
+        name = str(row.get(mapping.get("name", ""), "")).strip()
+        address = str(row.get(mapping.get("address", ""), "")).strip()
+        city = str(row.get(mapping.get("city", ""), "")).strip()
+        code = str(row.get(mapping.get("code", ""), "")).strip()
+        issues: list[str] = []
+        if not name and not address:
+            issues.append("门店名称和详细地址不能同时为空")
+        key = ("code", code.lower()) if code else ("store", name.lower(), city.lower(), address.lower())
+        if key in seen:
+            issues.append("与文件内其他门店重复")
+            duplicate_count += 1
+        else:
+            seen.add(key)
+        enriched = {**row, "_row_number": index, "_valid": not issues, "_issues": issues}
+        if len(preview) < 20:
+            preview.append(enriched)
+        if not issues:
+            valid.append(row)
+    return valid, preview, duplicate_count
+
+
 @app.post("/api/import/preview")
 async def import_preview(file: UploadFile = File(...)):
     filename = Path(file.filename or "").name
@@ -522,9 +547,19 @@ async def import_preview(file: UploadFile = File(...)):
     if "name" not in mapping and "address" not in mapping:
         raise HTTPException(400, "门店名称和详细地址至少需要识别到一列")
     clean_df = df.fillna("").astype(str)
-    rows = clean_df.head(20).to_dict("records")
     all_rows = clean_df.to_dict("records")
-    return ok({"filename":filename,"headers":headers,"mapping":mapping,"rows":rows,"all_rows":all_rows,"total_rows":len(df),"warnings":[]})
+    valid_rows, rows, duplicates = _validate_import_rows(all_rows, mapping)
+    warnings = []
+    if duplicates:
+        warnings.append(f"发现 {duplicates} 行重复门店，创建任务时会自动跳过")
+    invalid = len(all_rows) - len(valid_rows) - duplicates
+    if invalid > 0:
+        warnings.append(f"发现 {invalid} 行缺少门店名称和详细地址")
+    return ok({
+        "filename":filename,"headers":headers,"mapping":mapping,"rows":rows,"all_rows":all_rows,
+        "total_rows":len(df),"valid_rows":len(valid_rows),"invalid_rows":len(all_rows)-len(valid_rows),
+        "duplicate_rows":duplicates,"warnings":warnings,
+    })
 
 
 @app.get("/api/import/template")
@@ -541,17 +576,27 @@ def import_template():
 def import_confirm(body: dict[str, Any]):
     rows = body.get("rows") or []
     mapping = body.get("mapping") or {}
+    if "name" not in mapping and "address" not in mapping:
+        raise HTTPException(400, "请至少映射门店名称或详细地址")
+    valid_rows, _, duplicates = _validate_import_rows(rows, mapping)
+    if not valid_rows:
+        raise HTTPException(400, "没有可导入的有效门店")
+    config = body.get("config") or {}
+    radii = sorted(set(int(x) for x in (config.get("radii") or [500,1000,2000])))
+    categories = [x for x in (config.get("categories") or ["住宅小区","幼儿园","小学"]) if x in CATEGORIES]
+    if not radii or len(radii) > 5 or any(x <= 0 or x > 50000 for x in radii):
+        raise HTTPException(400, "批量搜索半径需为 1 至 5 个、且不超过 50 公里的正整数")
+    if not categories:
+        raise HTTPException(400, "请至少选择一个 POI 分类")
     with SessionLocal() as db:
-        job=AnalysisJob(filename=body.get("filename"),status="正在匹配门店",total_stores=len(rows));db.add(job);db.flush()
-        for row in rows:
+        job=AnalysisJob(filename=body.get("filename"),status="等待开始匹配",total_stores=len(valid_rows),config={"mapping":mapping,"radii":radii,"categories":categories,"generate_profile":bool(config.get("generate_profile",True))});db.add(job);db.flush()
+        for row in valid_rows:
             name = str(row.get(mapping.get("name", ""), "")).strip()
             address = str(row.get(mapping.get("address", ""), "")).strip()
-            if not name and not address:
-                continue
             store=Store(input_name=name or address, user_code=str(row.get(mapping.get("code",""),"")) or None, province=str(row.get(mapping.get("province",""),"")), city=str(row.get(mapping.get("city",""),"")),district=str(row.get(mapping.get("district",""),"")),address=address,raw_address=address or None,location_source="待定位");db.add(store);db.flush()
-            db.add(AnalysisJobStore(analysis_job_id=job.id,store_id=store.id,status="等待处理"))
-        job.status="等待人工确认";job.pending_stores=len(rows);db.commit()
-        return ok({"job_id":job.id,"status":job.status})
+            db.add(AnalysisJobStore(analysis_job_id=job.id,store_id=store.id,status="等待匹配"))
+        db.commit()
+        return ok({"job_id":job.id,"status":job.status,"accepted":len(valid_rows),"rejected":len(rows)-len(valid_rows),"duplicates":duplicates})
 
 
 @app.get("/api/analysis-jobs")
@@ -571,12 +616,29 @@ def get_job(job_id:int):
 
 @app.post("/api/analysis-jobs/{job_id}/resume")
 def resume(job_id:int):
-    return set_job_status(job_id,"等待处理")
+    with SessionLocal() as db:
+        job=db.get(AnalysisJob,job_id)
+        if not job: raise HTTPException(404,"任务不存在")
+        if job.status == "已取消":
+            job.status = "等待继续匹配"
+        db.commit();return ok(serialize_job(job))
 
 
 @app.post("/api/analysis-jobs/{job_id}/retry")
 def retry(job_id:int):
-    return set_job_status(job_id,"等待处理")
+    with SessionLocal() as db:
+        job=db.get(AnalysisJob,job_id)
+        if not job: raise HTTPException(404,"任务不存在")
+        links=db.scalars(select(AnalysisJobStore).where(AnalysisJobStore.analysis_job_id==job_id)).all()
+        retried=0
+        for link in links:
+            if link.status == "匹配失败":
+                link.status="等待匹配";link.error_code=None;link.error_message=None;retried+=1
+            elif link.status == "分析失败":
+                link.status="已确认";link.error_code=None;link.error_message=None;retried+=1
+        job.status="等待继续匹配" if any(x.status=="等待匹配" for x in links) else "匹配完成"
+        job.failed_stores=max(0,job.failed_stores-retried);db.commit()
+        return ok({"job":serialize_job(job),"retried":retried})
 
 
 @app.post("/api/analysis-jobs/{job_id}/cancel")
@@ -587,16 +649,123 @@ def cancel(job_id:int):
 @app.get("/api/analysis-jobs/{job_id}/pending-matches")
 def pending(job_id:int):
     with SessionLocal() as db:
-        links=db.scalars(select(AnalysisJobStore).where(AnalysisJobStore.analysis_job_id==job_id,AnalysisJobStore.status=="等待处理")).all()
-        stores=[db.get(Store,x.store_id) for x in links]
-        return ok([serialize_store(x) for x in stores if x])
+        links=db.scalars(select(AnalysisJobStore).where(AnalysisJobStore.analysis_job_id==job_id,AnalysisJobStore.status=="待人工确认")).all()
+        result=[]
+        for link in links:
+            store=db.get(Store,link.store_id)
+            candidates=db.scalars(select(StoreMatchCandidate).where(StoreMatchCandidate.store_id==link.store_id).order_by(StoreMatchCandidate.score.desc())).all()
+            result.append({"store":serialize_store(store),"candidates":[{"id":x.id,"amap_poi_id":x.amap_poi_id,"name":x.name,"address":x.address,"location":[x.longitude,x.latitude],"score":x.score,"reasons":x.reasons} for x in candidates]})
+        return ok(result)
+
+
+def _apply_match(store: Store, candidate: dict[str, Any], method: str) -> None:
+    location=candidate.get("location") or [None,None]
+    store.standard_name=candidate.get("name") or store.input_name
+    store.amap_poi_id=candidate.get("id") or candidate.get("amap_poi_id")
+    store.longitude,store.latitude=location[0],location[1]
+    store.province=candidate.get("province") or store.province
+    store.city=candidate.get("city") or store.city
+    store.district=candidate.get("district") or store.district
+    store.adcode=candidate.get("adcode") or store.adcode
+    store.address=candidate.get("address") or store.address
+    store.standardized_address=candidate.get("formatted_address") or candidate.get("address") or store.standardized_address
+    store.geocode_level=candidate.get("level") or store.geocode_level
+    store.poi_type=candidate.get("type") or store.poi_type
+    store.poi_typecode=candidate.get("typecode") or store.poi_typecode
+    store.match_score=int(candidate.get("score") or 0)
+    store.match_status="已确认";store.location_source=method
+    store.confirmation_method=method;store.confirmed_by="本地用户";store.confirmed_at=datetime.utcnow();store.last_verified_at=datetime.utcnow()
+
+
+def _refresh_match_counts(db, job: AnalysisJob) -> dict[str, int]:
+    links=db.scalars(select(AnalysisJobStore).where(AnalysisJobStore.analysis_job_id==job.id)).all()
+    statuses=[x.status for x in links]
+    matched=sum(x in {"已确认","分析完成"} for x in statuses)
+    pending=statuses.count("待人工确认")
+    failed=sum(x in {"匹配失败","分析失败"} for x in statuses)
+    remaining=sum(x in {"等待匹配","等待处理"} for x in statuses)
+    job.matched_stores=matched;job.pending_stores=pending;job.failed_stores=failed
+    job.processed_stores=len(statuses)-remaining
+    if remaining: job.status="等待继续匹配"
+    elif pending: job.status="等待人工确认"
+    elif failed: job.status="匹配部分失败"
+    else: job.status="匹配完成"
+    return {"matched":matched,"pending":pending,"failed":failed,"remaining":remaining}
+
+
+@app.post("/api/analysis-jobs/{job_id}/match-next")
+async def match_next(job_id:int, body:dict[str,Any]):
+    batch_size=max(1,min(50,int(body.get("batch_size") or 10)))
+    with SessionLocal() as db:
+        job=db.get(AnalysisJob,job_id)
+        if not job: raise HTTPException(404,"任务不存在")
+        if job.status == "已取消": raise HTTPException(409,"任务已取消，请先恢复任务")
+        links=db.scalars(select(AnalysisJobStore).where(AnalysisJobStore.analysis_job_id==job_id,AnalysisJobStore.status.in_(["等待匹配","等待处理"])).order_by(AnalysisJobStore.id).limit(batch_size)).all()
+        snapshots=[]
+        for link in links:
+            store=db.get(Store,link.store_id)
+            snapshots.append({"link_id":link.id,"store_id":store.id,"name":store.input_name,"province":store.province or "","city":store.city or "","district":store.district or "","address":store.raw_address or store.address or "","address_only":bool(store.raw_address and store.input_name==store.raw_address)})
+        job.status="正在匹配门店";db.commit()
+    client=AmapClient()
+    for item in snapshots:
+        try:
+            query={key:item[key] for key in ("name","province","city","district","address")}
+            if item["address_only"]:
+                raw=await client.geocode(query)
+                scored=[]
+                for index,candidate in enumerate(raw[:5]):
+                    precise=candidate.get("level") not in {"省","市","区县","道路","未知"}
+                    scored.append({**candidate,"id":f"GEO-{candidate.get('adcode') or index}-{','.join(map(str,candidate.get('location') or []))}","name":item["name"],"address":candidate.get("formatted_address") or item["address"],"score":85 if precise else 60,"auto_confirm":precise,"reasons":[f"地址解析级别：{candidate.get('level') or '未知'}"]})
+            else:
+                raw=await client.search_store(query)
+                initial=[(candidate,evaluate_candidate(query,candidate)) for candidate in raw[:10]]
+                unique_high=len([result for _,result in initial if result["score"]>=80 and not result["conflicts"]])==1
+                scored=[{**candidate,**evaluate_candidate(query,candidate,unique_high_match=unique_high)} for candidate,_ in initial]
+                scored.sort(key=lambda x:x["score"],reverse=True)
+                for index,candidate in enumerate(scored):
+                    margin=candidate["score"]-(scored[index+1]["score"] if index+1<len(scored) else 0)
+                    candidate["auto_confirm"]=bool(candidate.get("auto_confirm") and margin>=15)
+                    candidate["reasons"]=candidate.get("reasons") or []
+            with SessionLocal() as db:
+                link=db.get(AnalysisJobStore,item["link_id"]);store=db.get(Store,item["store_id"])
+                for old in db.scalars(select(StoreMatchCandidate).where(StoreMatchCandidate.store_id==store.id)).all(): db.delete(old)
+                for candidate in scored[:5]:
+                    location=candidate.get("location") or [None,None]
+                    if len(location)<2 or location[0] is None or location[1] is None: continue
+                    db.add(StoreMatchCandidate(store_id=store.id,amap_poi_id=str(candidate.get("id") or ""),name=str(candidate.get("name") or store.input_name),address=str(candidate.get("address") or ""),longitude=float(location[0]),latitude=float(location[1]),score=int(candidate.get("score") or 0),reasons=list(candidate.get("reasons") or [])))
+                if scored and scored[0].get("auto_confirm"):
+                    _apply_match(store,scored[0],"批量高置信度自动确认");link.status="已确认"
+                elif scored:
+                    store.match_status="待人工确认";link.status="待人工确认"
+                else:
+                    store.match_status="匹配失败";link.status="匹配失败";link.error_code="NO_CANDIDATE";link.error_message="高德未返回候选位置"
+                db.commit()
+        except Exception as exc:
+            with SessionLocal() as db:
+                link=db.get(AnalysisJobStore,item["link_id"]);store=db.get(Store,item["store_id"])
+                link.status="匹配失败";link.error_code=getattr(exc,"code","MATCH_ERROR");link.error_message=str(exc);store.match_status="匹配失败";db.commit()
+    with SessionLocal() as db:
+        job=db.get(AnalysisJob,job_id);counts=_refresh_match_counts(db,job);db.commit()
+        return ok({"job":serialize_job(job),**counts})
 
 
 @app.post("/api/analysis-jobs/{job_id}/confirm-matches")
 def confirm_matches(job_id:int, body:dict[str,Any]):
     selections=body.get("selections") or []
     if not selections: raise HTTPException(400,"未提供可确认的候选项")
-    return ok({"confirmed":len(selections)},"候选门店已确认")
+    confirmed=0
+    with SessionLocal() as db:
+        job=db.get(AnalysisJob,job_id)
+        if not job: raise HTTPException(404,"任务不存在")
+        for selection in selections:
+            store_id=int(selection.get("store_id") or 0);candidate_id=int(selection.get("candidate_id") or 0)
+            link=db.scalar(select(AnalysisJobStore).where(AnalysisJobStore.analysis_job_id==job_id,AnalysisJobStore.store_id==store_id))
+            candidate=db.get(StoreMatchCandidate,candidate_id);store=db.get(Store,store_id)
+            if not link or not candidate or candidate.store_id!=store_id or not store: continue
+            _apply_match(store,{"id":candidate.amap_poi_id,"name":candidate.name,"address":candidate.address,"location":[candidate.longitude,candidate.latitude],"score":candidate.score},"批量人工选择候选")
+            link.status="已确认";link.error_code=None;link.error_message=None;confirmed+=1
+        counts=_refresh_match_counts(db,job);db.commit()
+        return ok({"confirmed":confirmed,"job":serialize_job(job),**counts},"候选门店已确认")
 
 
 @app.post("/api/analysis-jobs/{job_id}/business-district-analysis")
@@ -606,7 +775,11 @@ async def create_batch_business_analysis(job_id: int, body: BusinessAnalysisBody
         if not job:
             raise HTTPException(404, "任务不存在")
         links = db.scalars(select(AnalysisJobStore).where(AnalysisJobStore.analysis_job_id == job_id)).all()
-        store_ids = [link.store_id for link in links]
+        stores = {link.store_id: db.get(Store, link.store_id) for link in links}
+        store_ids = [link.store_id for link in links if stores[link.store_id] and stores[link.store_id].longitude is not None and link.status in {"已确认","已完成","分析完成","分析失败"}]
+        pending_count = len(links) - len(store_ids)
+        if not store_ids:
+            raise HTTPException(400, "当前任务没有已确认坐标的门店，请先完成批量匹配")
         job.status = "正在生成商圈画像"; job.processed_stores = 0; db.commit()
     completed, failed = 0, []
     for store_id in store_ids:
@@ -620,9 +793,10 @@ async def create_batch_business_analysis(job_id: int, body: BusinessAnalysisBody
         job.processed_stores = completed + len(failed)
         job.success_stores = completed
         job.failed_stores = len(failed)
-        job.status = "已完成" if not failed else "部分完成"
+        job.pending_stores = pending_count
+        job.status = "已完成" if not failed and not pending_count else "部分完成"
         db.commit()
-    return ok({"job_id": job_id, "completed": completed, "failed": failed, "status": "已完成" if not failed else "部分完成"})
+    return ok({"job_id": job_id, "completed": completed, "failed": failed, "pending": pending_count,"status": "已完成" if not failed and not pending_count else "部分完成"})
 
 
 @app.get("/api/analysis-jobs/{job_id}/business-district-results")
@@ -645,6 +819,7 @@ def export_job(job_id: int):
         stores=[db.get(Store,x.store_id) for x in links]
         pois=db.scalars(select(PoiResult).where(PoiResult.analysis_job_id==job_id)).all()
         analyses=db.scalars(select(BusinessDistrictAnalysis).where(BusinessDistrictAnalysis.analysis_job_id==job_id)).all()
+        candidate_counts={link.store_id:len(db.scalars(select(StoreMatchCandidate).where(StoreMatchCandidate.store_id==link.store_id)).all()) for link in links}
     wb=Workbook();ws=wb.active;ws.title="门店汇总"
     ws.append(["用户门店编号","用户输入门店名称","高德标准门店名称","匹配状态","匹配分数","省份","城市","区县","地址","经度","纬度","高德POI ID","是否存在截断","最后分析时间"])
     for s in stores: ws.append([safe_excel(x) for x in [s.user_code,s.input_name,s.standard_name,s.match_status,s.match_score,s.province,s.city,s.district,s.address,s.longitude,s.latitude,s.amap_poi_id,"是" if job.truncated else "否",job.updated_at]])
@@ -654,9 +829,18 @@ def export_job(job_id: int):
     for p in pois:
         s=store_by_id.get(p.store_id);ws2.append([safe_excel(x) for x in [s.input_name,s.standard_name,s.amap_poi_id,s.longitude,s.latitude,p.poi_category,p.name,p.poi_type,p.poi_typecode,p.amap_poi_id,p.province,p.city,p.district,p.address,p.longitude,p.latitude,p.straight_distance_m,p.walking_distance_m,p.walking_duration_s,p.distance_bucket,p.search_keyword,p.search_typecodes,p.search_radius,p.created_at,p.manually_corrected,p.excluded]])
     style_sheet(ws2)
+    link_by_store={link.store_id:link for link in links}
     for title,headers in [("待确认门店",["原始门店名称","城市","候选数量","匹配状态","原因"]),("失败记录",["门店","处理阶段","错误代码","中文错误说明","是否可重试","最后重试时间"]),("搜索配置",["搜索半径","POI分类","typecodes","关键词","查询时间","坐标体系","数据来源说明"])]:
         sheet=wb.create_sheet(title);sheet.append(headers)
-        if title=="搜索配置": sheet.append([str(job.config.get("radii",[])),",".join(job.config.get("categories",[])),"见分类配置","竞品按关键词",job.updated_at,"GCJ-02","演示模式" if os.getenv("ENABLE_MOCK_AMAP","true").lower()=="true" else "高德 Web 服务 API"])
+        if title=="待确认门店":
+            for store in stores:
+                link=link_by_store.get(store.id)
+                if link and link.status=="待人工确认": sheet.append([safe_excel(store.input_name),safe_excel(store.city),candidate_counts.get(store.id,0),store.match_status,"请人工选择正确候选"])
+        elif title=="失败记录":
+            for store in stores:
+                link=link_by_store.get(store.id)
+                if link and link.status in {"匹配失败","分析失败"}: sheet.append([safe_excel(store.input_name),"门店匹配" if link.status=="匹配失败" else "画像分析",link.error_code,safe_excel(link.error_message),"是",link.updated_at])
+        elif title=="搜索配置": sheet.append([str(job.config.get("radii",[])),",".join(job.config.get("categories",[])),"见分类配置","竞品按关键词",job.updated_at,"GCJ-02","演示模式" if os.getenv("ENABLE_MOCK_AMAP","true").lower()=="true" else "高德 Web 服务 API"])
         style_sheet(sheet)
     append_business_sheets(wb, analyses, {s.id: s for s in stores})
     buf=io.BytesIO();wb.save(buf);buf.seek(0)
@@ -747,7 +931,7 @@ def serialize_poi(p:PoiResult):
 
 
 def serialize_job(j:AnalysisJob):
-    return {"id":j.id,"filename":j.filename,"status":j.status,"total_stores":j.total_stores,"processed_stores":j.processed_stores,"matched_stores":j.matched_stores,"pending_stores":j.pending_stores,"success_stores":j.success_stores,"failed_stores":j.failed_stores,"truncated":j.truncated,"created_at":j.created_at.isoformat(),"updated_at":j.updated_at.isoformat()}
+    return {"id":j.id,"filename":j.filename,"status":j.status,"total_stores":j.total_stores,"processed_stores":j.processed_stores,"matched_stores":j.matched_stores,"pending_stores":j.pending_stores,"success_stores":j.success_stores,"failed_stores":j.failed_stores,"truncated":j.truncated,"config":j.config or {},"created_at":j.created_at.isoformat(),"updated_at":j.updated_at.isoformat()}
 
 
 def style_sheet(ws):
