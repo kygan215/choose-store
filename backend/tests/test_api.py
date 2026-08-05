@@ -43,11 +43,11 @@ def test_full_mock_flow():
         export=client.get(f"/api/analysis-jobs/{body['job_id']}/export")
         assert export.status_code==200
         wb=load_workbook(io.BytesIO(export.content))
-        assert {"门店汇总","POI明细","待确认门店","失败记录","搜索配置","商圈汇总","商圈特征明细","商圈评分配置"}<=set(wb.sheetnames)
+        assert {"门店汇总","POI明细","待确认门店","失败记录","搜索配置","商圈汇总","商圈特征明细","潜在人群画像","商圈评分配置"}<=set(wb.sheetnames)
 
         business_export = client.get(f"/api/analysis-jobs/{body['job_id']}/business-district-export")
         business_wb = load_workbook(io.BytesIO(business_export.content))
-        assert {"商圈汇总", "商圈特征明细", "商圈评分配置"} == set(business_wb.sheetnames)
+        assert {"商圈汇总", "商圈特征明细", "潜在人群画像", "商圈评分配置"} == set(business_wb.sheetnames)
 
 
 def test_import_preview_and_errors():

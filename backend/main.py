@@ -22,7 +22,7 @@ from .business_district import DISCLAIMER, FEATURE_PACK, analyze_business_distri
 from .core import confidence_status, deduplicate_pois, distance_bucket, evaluate_candidate, haversine_m, map_headers, safe_excel
 from .database import AnalysisJob, AnalysisJobStore, AuditLog, BusinessDistrictAnalysis, BusinessDistrictConfig, PoiCategory, PoiResult, SearchRequestLog, SessionLocal, Store, init_db
 
-app = FastAPI(title="门店周边 POI 搜索与分析平台", version="1.0.0")
+app = FastAPI(title="门店周边 POI 搜索与分析平台", version="1.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -365,6 +365,7 @@ def _serialize_business_analysis(item: BusinessDistrictAnalysis) -> dict[str, An
         "level": {"level": item.level, "score": item.level_score, "mode": item.level_mode},
         "fit": {"score": item.fit_score, "level": item.fit_level},
         "competition": {"score": item.competition_score, "level": item.competition_level},
+        "audience_profile": (item.feature_vector or {}).get("audience_profile"),
         "confidence_level": item.confidence_level,
         "feature_vector": item.feature_vector,
         "evidence": item.evidence,
@@ -702,6 +703,23 @@ def append_business_sheets(wb: Workbook, analyses: list[BusinessDistrictAnalysis
             for category, count in counts.items():
                 details.append([safe_excel(store.input_name if store else item.store_id), int(radius), category, count, layer.get("density"), layer.get("nearest", {}).get(category), "是" if (item.truncation_flags or {}).get("any") else "否", "否" if item.warning_messages else "是", None, None, None])
     style_sheet(details)
+
+    audience = wb.create_sheet("潜在人群画像")
+    audience.append(["门店","主要潜在人群","年龄段倾向","消费环境判断","消费环境指数","商场档次线索","商场样本数","画像可信度","推断依据","重要限制"])
+    for item in analyses:
+        store = store_map.get(item.store_id)
+        profile = (item.feature_vector or {}).get("audience_profile") or {}
+        groups = profile.get("primary_groups") or []
+        consumption = profile.get("consumption_power") or {}
+        mall = profile.get("mall_profile") or {}
+        audience.append([safe_excel(value) for value in [
+            store.input_name if store else item.store_id,
+            "；".join(str(group.get("label") or "") for group in groups),
+            "；".join(str(group.get("age_range") or "") for group in groups),
+            consumption.get("level"), consumption.get("index"), mall.get("level"), mall.get("sample_count"),
+            profile.get("confidence"), "；".join(profile.get("evidence") or []), "；".join(profile.get("limitations") or []),
+        ]])
+    style_sheet(audience)
 
     config = wb.create_sheet("商圈评分配置")
     config.append(["配置项","配置内容"])

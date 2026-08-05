@@ -1,4 +1,4 @@
-from backend.business_district import analyze_business_district, classify_business_type
+from backend.business_district import analyze_business_district, classify_business_type, infer_audience_profile, build_feature_vector
 
 
 def _features(**values):
@@ -32,3 +32,23 @@ def test_business_analysis_handles_empty_business_area_and_truncation():
     assert result["confidence_level"] in {"中", "低"}
     assert result["truncation_flags"]["any"] is True
     assert result["warning_messages"]
+    assert result["audience_profile"]["method"] == "POI环境代理模型（规则推断）"
+    assert result["audience_profile"]["limitations"]
+
+
+def test_audience_profile_exposes_age_consumption_and_mall_inference():
+    items = (
+        [{"category":"住宅", "distance":300, "name":f"社区{i}"} for i in range(20)]
+        + [{"category":"教育", "distance":500, "name":f"实验小学{i}"} for i in range(12)]
+        + [{"category":"商业", "distance":900, "name":"万象城"}, {"category":"商业", "distance":1200, "name":"区域购物中心"}]
+        + [{"category":"商务办公", "distance":700, "name":f"写字楼{i}"} for i in range(15)]
+        + [{"category":"交通", "distance":600, "name":f"公交站{i}"} for i in range(10)]
+    )
+    vector = build_feature_vector(items)
+    normalized = {name: 70 for name in _features()}
+    profile = infer_audience_profile(items, vector, normalized)
+    assert len(profile["age_segments"]) == 5
+    assert "岁" in profile["primary_groups"][0]["age_range"]
+    assert profile["consumption_power"]["index"] > 0
+    assert profile["mall_profile"]["level"] == "中高端商业线索"
+    assert "不是高德官方评级" in profile["summary"][2]

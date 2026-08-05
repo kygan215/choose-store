@@ -5,13 +5,18 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
-ALGORITHM_VERSION = "business-district-1.0.0"
+ALGORITHM_VERSION = "business-district-1.1.0"
 POI_CONFIG_VERSION = "amap-feature-pack-2026-08"
 WEIGHT_VERSION = "snack-family-fit-1.0"
 DEFAULT_BUSINESS_RADII = [500, 1000, 2000]
 DISCLAIMER = (
     "本分析基于高德POI点位、分类、距离和商圈字段生成，仅反映周边设施与商业配套分布，"
     "不等同于真实人口、客流、居民收入、消费能力或销售预测。POI可能存在遗漏、更新延迟或查询上限。"
+)
+
+AUDIENCE_DISCLAIMER = (
+    "潜在人群画像由周边POI环境代理推断，不是手机信令、人口普查、会员或订单数据。"
+    "年龄段指数不代表人数占比，消费能力等级不代表居民真实收入或实际客单价。"
 )
 
 FEATURE_PACK = {
@@ -173,6 +178,124 @@ def score_fit(vector: dict[str, Any], normalized: dict[str, float], competition_
     return {"score": score, "level": level, "components": components, "competition_penalty": round(penalty, 1)}
 
 
+def infer_audience_profile(items: list[dict[str, Any]], vector: dict[str, Any], normalized: dict[str, float]) -> dict[str, Any]:
+    """Build an explainable environmental proxy profile without claiming demographic facts."""
+    one_key = str(min(vector["radii"], key=lambda x: abs(x - 1000)))
+    counts = vector["layers"][one_key]["counts"]
+    nearby_names = [
+        str(item.get("name") or "")
+        for item in items
+        if float(item.get("distance") or 0) <= 2000
+    ]
+    joined_names = "|".join(nearby_names)
+    university_hits = sum(word in joined_names for word in ("大学", "学院", "职业技术", "校区"))
+    family_hits = sum(word in joined_names for word in ("幼儿园", "小学", "中学", "实验学校"))
+    premium_hits = sum(word in joined_names for word in ("万象城", "恒隆", "国金", "天地", "太古", "大悦城", "天街"))
+    regional_mall_hits = sum(word in joined_names for word in ("万达广场", "购物中心", "广场", "百货", "奥特莱斯", "银泰", "武商"))
+    value_hits = sum(word in joined_names for word in ("批发", "农贸", "折扣", "平价", "集贸"))
+
+    def weighted(*parts: tuple[float, float]) -> float:
+        return round(min(100.0, max(0.0, sum(value * weight for value, weight in parts))), 1)
+
+    age_segments = [
+        {
+            "label": "学龄家庭",
+            "age_range": "家长约28–45岁，儿童约3–17岁",
+            "index": weighted((normalized.get("住宅", 0), .42), (normalized.get("教育", 0), .48), (min(100, family_hits * 20), .10)),
+            "basis": "住宅与学校、幼儿园等教育设施共同出现",
+        },
+        {
+            "label": "青年学生",
+            "age_range": "约18–24岁",
+            "index": weighted((normalized.get("教育", 0), .42), (normalized.get("餐饮娱乐", 0), .23), (normalized.get("交通", 0), .20), (min(100, university_hits * 30), .15)),
+            "basis": "高校线索以及餐饮、交通配套共同出现",
+        },
+        {
+            "label": "青年职场人群",
+            "age_range": "约22–35岁",
+            "index": weighted((normalized.get("商务办公", 0), .43), (normalized.get("产业园区", 0), .17), (normalized.get("交通", 0), .22), (normalized.get("餐饮娱乐", 0), .18)),
+            "basis": "办公、产业园、通勤交通与餐饮密度",
+        },
+        {
+            "label": "稳定家庭居民",
+            "age_range": "约30–49岁",
+            "index": weighted((normalized.get("住宅", 0), .48), (normalized.get("零售生活", 0), .22), (normalized.get("教育", 0), .15), (normalized.get("医疗休闲", 0), .15)),
+            "basis": "住宅基础与日常零售、教育、医疗休闲配套",
+        },
+        {
+            "label": "成熟社区居民",
+            "age_range": "约45岁以上",
+            "index": weighted((normalized.get("住宅", 0), .45), (normalized.get("医疗休闲", 0), .35), (normalized.get("零售生活", 0), .20)),
+            "basis": "住宅与医疗、休闲及生活服务设施",
+        },
+    ]
+    age_segments.sort(key=lambda item: item["index"], reverse=True)
+
+    consumption_index = weighted(
+        (normalized.get("商业", 0), .24),
+        (normalized.get("餐饮娱乐", 0), .18),
+        (normalized.get("商务办公", 0), .22),
+        (normalized.get("零售生活", 0), .16),
+        (normalized.get("交通", 0), .10),
+        (min(100, premium_hits * 35 + regional_mall_hits * 12 - value_hits * 10), .10),
+    )
+    if consumption_index >= 70:
+        consumption_level = "中高消费环境倾向"
+    elif consumption_index >= 45:
+        consumption_level = "大众稳定消费环境"
+    else:
+        consumption_level = "基础型、价格敏感环境倾向"
+
+    mall_items = [
+        item for item in items
+        if item.get("category") == "商业" and float(item.get("distance") or 0) <= 2000
+    ]
+    mall_names = list(dict.fromkeys(str(item.get("name") or "") for item in mall_items if item.get("name")))[:8]
+    if premium_hits:
+        mall_level = "中高端商业线索"
+    elif regional_mall_hits >= 2 or len(mall_items) >= 5:
+        mall_level = "区域综合型商业线索"
+    elif mall_items:
+        mall_level = "社区型或大众商业线索"
+    else:
+        mall_level = "暂无足够商场样本"
+    mall_confidence = "中" if premium_hits or regional_mall_hits >= 2 or len(mall_items) >= 5 else "低"
+
+    profile_confidence = "中" if counts.get("住宅", 0) >= 8 and sum(counts.values()) >= 30 else "低"
+    leaders = age_segments[:2]
+    summary = [
+        f"周边潜在人群更偏向{leaders[0]['label']}（{leaders[0]['age_range']}）与{leaders[1]['label']}（{leaders[1]['age_range']}）。",
+        f"消费环境代理判断为“{consumption_level}”，指数 {consumption_index}/100。",
+        f"商场档次代理判断为“{mall_level}”，该结论不是高德官方评级。",
+    ]
+    return {
+        "method": "POI环境代理模型（规则推断）",
+        "confidence": profile_confidence,
+        "primary_groups": leaders,
+        "age_segments": age_segments,
+        "consumption_power": {
+            "level": consumption_level,
+            "index": consumption_index,
+            "confidence": profile_confidence,
+            "basis": "商业、餐饮、办公、生活零售、交通及商场品牌线索的组合指数",
+        },
+        "mall_profile": {
+            "level": mall_level,
+            "confidence": mall_confidence,
+            "sample_count": len(mall_items),
+            "sample_names": mall_names,
+            "basis": "购物中心数量、名称中的品牌与业态线索；不含官方商场等级",
+        },
+        "summary": summary,
+        "evidence": [
+            f"约1公里内住宅类POI {counts.get('住宅', 0)} 个、教育类POI {counts.get('教育', 0)} 个",
+            f"约1公里内办公类POI {counts.get('商务办公', 0)} 个、交通类POI {counts.get('交通', 0)} 个",
+            f"2公里内纳入判断的商业POI {len(mall_items)} 个",
+        ],
+        "limitations": [AUDIENCE_DISCLAIMER, "未接入住宅房价、建成年代、手机信令、会员、订单或SKU销售数据。"],
+    }
+
+
 def analyze_business_district(
     items: list[dict[str, Any]],
     *,
@@ -189,9 +312,11 @@ def analyze_business_district(
     level = score_level(vector, normalized, area["share"])
     competition = score_competition(vector)
     fit = score_fit(vector, normalized, competition["score"])
+    audience_profile = infer_audience_profile(items, vector, normalized)
     vector["level_indicators"] = level["indicators"]
     vector["fit_components"] = fit["components"]
     vector["competition"] = competition
+    vector["audience_profile"] = audience_profile
     warnings = list(failures or [])
     confidence_points = 100
     if not location_confirmed:
@@ -224,6 +349,7 @@ def analyze_business_district(
         "level": level,
         "fit": fit,
         "competition": competition,
+        "audience_profile": audience_profile,
         "confidence_level": confidence,
         "feature_vector": vector,
         "normalized_features": normalized,

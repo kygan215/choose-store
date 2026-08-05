@@ -26,7 +26,22 @@ type BusinessAnalysis = {
   business_district_type:{type:string;scores:Record<string,number>;confidence:string};
   level:{level:string;score:number;mode:string}; fit:{score:number;level:string};
   competition:{score:number;level:string}; feature_vector:{layers:Record<string,{total:number;density:number;counts:Record<string,number>;nearest:Record<string,number|null>}>;level_indicators?:Record<string,number>;fit_components?:Record<string,number>};
+  audience_profile?: AudienceProfileData | null;
   strengths:string[]; weaknesses:string[]; warning_messages:string[]; disclaimer:string; created_at:string;
+};
+type AudienceProfileData = {
+  method:string; confidence:string;
+  primary_groups:Array<{label:string;age_range:string;index:number;basis:string}>;
+  age_segments:Array<{label:string;age_range:string;index:number;basis:string}>;
+  consumption_power:{level:string;index:number;confidence:string;basis:string};
+  mall_profile:{level:string;confidence:string;sample_count:number;sample_names:string[];basis:string};
+  summary:string[]; evidence:string[]; limitations:string[];
+};
+type AMapObject = {destroy?:()=>void;add:(item:unknown)=>void;setFitView:(items:unknown[],immediate:boolean,padding:number[],maxZoom:number)=>void};
+type AMapApi = {
+  Map:new (element:HTMLDivElement,options:Record<string,unknown>)=>AMapObject;
+  Circle:new (options:Record<string,unknown>)=>unknown;
+  Marker:new (options:Record<string,unknown>)=>unknown;
 };
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000/api";
@@ -61,7 +76,7 @@ export default function Page() {
   const [drag, setDrag] = useState(false);
   const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
   const [batchJob, setBatchJob] = useState<{job_id:number;status:string}|null>(null);
-  const [resultTab,setResultTab] = useState<"distribution"|"profile"|"details">("distribution");
+  const [resultTab,setResultTab] = useState<"distribution"|"profile"|"audience"|"details">("distribution");
   const [business,setBusiness] = useState<BusinessAnalysis|null>(null);
 
   useEffect(() => { request<typeof mode>("/health").then(setMode).catch(() => setError("后端服务未连接，请先启动 FastAPI 服务")); }, []);
@@ -224,7 +239,7 @@ export default function Page() {
             <button className="primary analyze-btn" disabled={!selected||!categories.length||!radii.length||!!busy} onClick={analyze}>{busy==="poi"?"正在查询并去重…":"开始周边 POI 分析"}</button>
           </section>
 
-          {pois.length>0 && <><div className="result-tabs"><button className={resultTab==="distribution"?"on":""} onClick={()=>setResultTab("distribution")}>POI分布</button><button className={resultTab==="profile"?"on":""} onClick={()=>setResultTab("profile")}>商圈画像</button><button className={resultTab==="details"?"on":""} onClick={()=>setResultTab("details")}>POI明细</button><button className="primary profile-action" disabled={!!busy} onClick={generateBusinessProfile}>{busy==="business"?"正在查询更多特征…":business?"重新生成商圈画像":"生成商圈画像"}</button></div>
+          {pois.length>0 && <><div className="result-tabs"><button className={resultTab==="distribution"?"on":""} onClick={()=>setResultTab("distribution")}>POI分布</button><button className={resultTab==="profile"?"on":""} onClick={()=>setResultTab("profile")}>商圈画像</button><button className={resultTab==="audience"?"on":""} onClick={()=>setResultTab("audience")}>潜在人群</button><button className={resultTab==="details"?"on":""} onClick={()=>setResultTab("details")}>POI明细</button><button className="primary profile-action" disabled={!!busy} onClick={generateBusinessProfile}>{busy==="business"?"正在查询更多特征…":business?"重新生成智能画像":"生成智能画像"}</button></div>
           {resultTab==="distribution"&&<section className="results">
             <div className="panel map-panel"><div className="panel-head"><div><h2>设施分布地图</h2><p>圆圈表示系统分析圈层，不代表高德官方商圈边界</p></div><div className="legend"><i/>门店 <i/>POI</div></div>
               <PoiMap store={selected} pois={pois} radii={radii}/>
@@ -234,7 +249,8 @@ export default function Page() {
               <div className="disclaimer">本分析仅反映周边设施与兴趣点分布，不等同于人口、客流、消费能力或销售预测。</div>
             </div>
           </section>}
-          {resultTab==="profile"&&<BusinessProfile data={business} onGenerate={generateBusinessProfile} busy={busy==="business"}/>} 
+          {resultTab==="profile"&&<BusinessProfile data={business} onGenerate={generateBusinessProfile} busy={busy==="business"}/>}
+          {resultTab==="audience"&&<AudienceProfile data={business?.audience_profile||null} onGenerate={generateBusinessProfile} busy={busy==="business"}/>}
           {resultTab==="details"&&<section className="panel table-panel"><div className="panel-head"><div><h2>POI明细</h2><p>按直线距离排序</p></div>{jobId&&<a className="download" href={`${API}/analysis-jobs/${jobId}/export`}>导出 Excel</a>}</div><div className="table-wrap"><table><thead><tr><th>POI 名称</th><th>分类</th><th>地址</th><th>直线距离</th><th>距离层级</th></tr></thead><tbody>{pois.map(p=><tr key={p.id}><td>{p.name}</td><td><span className="tag">{p.category}</span></td><td>{p.address}</td><td>{p.distance} m</td><td>{(p as Poi & {distance_bucket?:string}).distance_bucket}</td></tr>)}</tbody></table></div></section>}
           </>}
         </>}
@@ -322,15 +338,34 @@ function BusinessProfile({data,onGenerate,busy}:{data:BusinessAnalysis|null;onGe
   </section>
 }
 
+function AudienceProfile({data,onGenerate,busy}:{data:AudienceProfileData|null;onGenerate:()=>void;busy:boolean}) {
+  if(!data) return <section className="panel profile-empty"><h2>尚未生成潜在人群画像</h2><p>系统会根据住宅、教育、办公、交通、商业等 POI 推断周边可能较多的人群年龄段和消费环境。结论不是人口统计或真实顾客数据。</p><button className="primary" disabled={busy} onClick={onGenerate}>{busy?"正在生成…":"生成智能画像"}</button></section>;
+  return <section className="audience-profile">
+    <div className="panel audience-hero">
+      <div><small>智能环境画像</small><h2>{data.primary_groups.map(x=>x.label).join(" + ")}</h2><p>{data.method} · 综合可信度：{data.confidence}</p></div>
+      <span className="confidence">推断结果</span>
+    </div>
+    <div className="panel narrative"><h2>一眼看懂</h2>{data.summary.map((text,index)=><p key={index}>{text}</p>)}</div>
+    <div className="audience-grid">
+      <div className="panel metric-chart"><h2>潜在人群年龄段指数</h2><p className="metric-note">指数用于比较环境倾向，不代表人口比例</p>{data.age_segments.map(item=><div className="age-row" key={item.label}><div><b>{item.label}</b><small>{item.age_range}</small></div><div className="bar"><span aria-hidden="true"/><div><i style={{width:`${item.index}%`}}/></div><b>{Math.round(item.index)}</b></div><p>{item.basis}</p></div>)}</div>
+      <div className="profile-stack">
+        <div className="panel insight-card"><small>消费能力代理判断</small><h2>{data.consumption_power.level}</h2><strong>{data.consumption_power.index}<i>/100</i></strong><p>{data.consumption_power.basis}</p><span>可信度：{data.consumption_power.confidence}</span></div>
+        <div className="panel insight-card"><small>商场档次代理判断</small><h2>{data.mall_profile.level}</h2><strong>{data.mall_profile.sample_count}<i> 个商业样本</i></strong><p>{data.mall_profile.basis}</p>{data.mall_profile.sample_names.length>0&&<div className="sample-tags">{data.mall_profile.sample_names.map(name=><span key={name}>{name}</span>)}</div>}<span>可信度：{data.mall_profile.confidence}</span></div>
+      </div>
+    </div>
+    <div className="panel evidence-grid audience-evidence"><div><h3>推断依据</h3>{data.evidence.map((x,i)=><p key={i}>• {x}</p>)}</div><div><h3>重要限制</h3>{data.limitations.map((x,i)=><p key={i}>• {x}</p>)}</div></div>
+  </section>;
+}
+
 function PoiMap({store,pois,radii}:{store:Candidate;pois:Poi[];radii:number[]}) {
   const ref = useRef<HTMLDivElement>(null);
   const jsKey = process.env.NEXT_PUBLIC_AMAP_JS_KEY || "";
   const securityCode = process.env.NEXT_PUBLIC_AMAP_SECURITY_CODE || "";
   useEffect(()=>{
     if (!jsKey || !ref.current) return;
-    let map: any;
+    let map: AMapObject | undefined;
     const draw = () => {
-      const AMap = (window as Window & {AMap?: any}).AMap;
+      const AMap = (window as Window & {AMap?: AMapApi}).AMap;
       if (!AMap || !ref.current) return;
       map = new AMap.Map(ref.current,{zoom:14,center:store.location,viewMode:"2D"});
       radii.forEach((radius,i)=>map.add(new AMap.Circle({center:store.location,radius,strokeColor:"#08745b",strokeOpacity:.55,strokeWeight:1,fillColor:"#67b79e",fillOpacity:.04,zIndex:10+i})));
@@ -340,7 +375,7 @@ function PoiMap({store,pois,radii}:{store:Candidate;pois:Poi[];radii:number[]}) 
       map.setFitView(markers,false,[60,60,60,60],16);
     };
     (window as Window & {_AMapSecurityConfig?:Record<string,string>})._AMapSecurityConfig={securityJsCode:securityCode};
-    if ((window as Window & {AMap?: any}).AMap) draw();
+    if ((window as Window & {AMap?: AMapApi}).AMap) draw();
     else {
       const existing=document.querySelector<HTMLScriptElement>('script[data-amap="poi-platform"]');
       if (existing) existing.addEventListener("load",draw,{once:true});
