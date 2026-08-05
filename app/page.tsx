@@ -146,7 +146,7 @@ export default function Page() {
     try{
       const storeId=(selected as Candidate & {storeId:number}).storeId;
       const data=await request<BusinessAnalysis>(`/stores/${storeId}/business-district-analysis`,{method:"POST",body:JSON.stringify({radii})});
-      setBusiness(data);setResultTab("profile");
+      setBusiness(data);setResultTab("audience");
     }catch(e){setError(e instanceof Error?e.message:"商圈画像生成失败")}finally{setBusy("")}
   }
 
