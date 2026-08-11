@@ -1,6 +1,143 @@
+name: storemap
+
+x-app-env: &app-env
+  DATABASE_URL: postgresql://${POSTGRES_USER:-storemap}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-storemap}
+  REDIS_URL: redis://redis:6379/0
+  AMAP_WEB_SERVICE_KEY: ${AMAP_WEB_SERVICE_KEY}
+  NEXT_PUBLIC_AMAP_JS_KEY: ${NEXT_PUBLIC_AMAP_JS_KEY}
+  NEXT_PUBLIC_AMAP_SECURITY_CODE: ${NEXT_PUBLIC_AMAP_SECURITY_CODE}
+  AMAP_REQUEST_INTERVAL_MS: ${AMAP_REQUEST_INTERVAL_MS:-100}
+  AMAP_REQUEST_TIMEOUT: ${AMAP_REQUEST_TIMEOUT:-15}
+  DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+  DEEPSEEK_API_BASE_URL: ${DEEPSEEK_API_BASE_URL:-https://api.deepseek.com}
+  DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-flash}
+  APP_ORIGIN: ${APP_ORIGIN:-}
+  COOKIE_SECURE: ${COOKIE_SECURE:-false}
+
 services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-storemap}
+      POSTGRES_USER: ${POSTGRES_USER:-storemap}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-storemap} -d ${POSTGRES_DB:-storemap}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [internal]
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server","--appendonly","yes","--maxmemory-policy","noeviction"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [internal]
+
+  migrate:
+    build:
+      context: .
+      target: api
+    restart: "no"
+    environment:
+      <<: *app-env
+      ADMIN_EMAIL: ${ADMIN_EMAIL}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      ADMIN_NAME: ${ADMIN_NAME:-系统管理员}
+      TENANT_NAME: ${TENANT_NAME:-店界 POI}
+    command: ["node","--import","tsx","server/migrate.ts"]
+    depends_on:
+      postgres: {condition: service_healthy}
+    networks: [internal]
+
   api:
-    build: .
-    ports: ["8000:8000"]
-    env_file: .env
-    volumes: ["./data:/app/data"]
+    build:
+      context: .
+      target: api
+    restart: unless-stopped
+    environment:
+      <<: *app-env
+      API_PORT: 8000
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-20}
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-180}
+      SESSION_HOURS: ${SESSION_HOURS:-12}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-15}
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks: [internal]
+
+  worker:
+    build:
+      context: .
+      target: api
+    restart: unless-stopped
+    environment:
+      <<: *app-env
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-3}
+      DB_POOL_SIZE: ${WORKER_DB_POOL_SIZE:-10}
+    command: ["node","--import","tsx","server/worker.ts"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+    networks: [internal]
+
+  web:
+    build:
+      context: .
+      target: web
+      args:
+        NEXT_PUBLIC_API_URL: /api
+        NEXT_PUBLIC_AMAP_JS_KEY: ${NEXT_PUBLIC_AMAP_JS_KEY}
+        NEXT_PUBLIC_AMAP_SECURITY_CODE: ${NEXT_PUBLIC_AMAP_SECURITY_CODE}
+    restart: unless-stopped
+    environment:
+      PORT: 3000
+    networks: [internal]
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./deploy/nginx-http.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      api: {condition: service_healthy}
+      web: {condition: service_started}
+    networks: [internal]
+
+  backup:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./backups:/backups
+    command: ["sh","-c","while true; do pg_dump -h postgres -U ${POSTGRES_USER:-storemap} -d ${POSTGRES_DB:-storemap} -Fc -f /backups/storemap-$$(date +%Y%m%d-%H%M%S).dump && find /backups -type f -mtime +${BACKUP_RETENTION_DAYS:-14} -delete; sleep 86400; done"]
+    depends_on:
+      postgres: {condition: service_healthy}
+    networks: [internal]
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:

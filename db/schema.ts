@@ -43,3 +43,22 @@ export const stores = sqliteTable("stores", {
   index("idx_stores_job_id").on(table.jobId),
   index("idx_stores_status").on(table.status),
 ]);
+
+export const aiAnalyses = sqliteTable("ai_analyses", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  scope: text("scope").notNull(),
+  jobId: integer("job_id").references(() => jobs.id, { onDelete: "cascade" }),
+  storeId: integer("store_id").references(() => stores.id, { onDelete: "cascade" }),
+  storeIdsJson: text("store_ids_json").notNull().default("[]"),
+  inputJson: text("input_json").notNull(),
+  resultJson: text("result_json").notNull(),
+  model: text("model").notNull(),
+  promptVersion: text("prompt_version").notNull(),
+  inputTokens: integer("input_tokens").notNull().default(0),
+  outputTokens: integer("output_tokens").notNull().default(0),
+  totalTokens: integer("total_tokens").notNull().default(0),
+  createdAt: text("created_at").notNull(),
+}, (table) => [
+  index("idx_ai_analyses_store_created").on(table.storeId, table.createdAt),
+  index("idx_ai_analyses_job_scope_created").on(table.jobId, table.scope, table.createdAt),
+]);

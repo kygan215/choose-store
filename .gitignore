@@ -33,6 +33,7 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 !.env.example
+!.env.production.example
 /data/*.db
 /data/*.log
 
@@ -42,8 +43,10 @@ yarn-error.log*
 # typescript
 next-env.d.ts
 /dist/
+*.tsbuildinfo
 /.wrangler/
 /outputs/
+/backups/
 /work/
 
 # python caches

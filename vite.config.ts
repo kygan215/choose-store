@@ -44,6 +44,14 @@ export default defineConfig(async () => {
   const { cloudflare } = await import("@cloudflare/vite-plugin");
 
   return {
+    define: {
+      "process.env.NEXT_PUBLIC_AMAP_JS_KEY": JSON.stringify(
+        process.env.NEXT_PUBLIC_AMAP_JS_KEY ?? "",
+      ),
+      "process.env.NEXT_PUBLIC_AMAP_SECURITY_CODE": JSON.stringify(
+        process.env.NEXT_PUBLIC_AMAP_SECURITY_CODE ?? "",
+      ),
+    },
     server: isCodexSeatbeltSandbox
       ? { watch: { useFsEvents: false, usePolling: true } }
       : undefined,

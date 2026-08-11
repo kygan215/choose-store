@@ -59,6 +59,9 @@ type BatchStore = {
 type BatchResult = BusinessAnalysis&{store:BatchStore;poi_summary:PoiSummary};
 type BatchStoreDetail = {job:JobRecord;store:BatchStore;status:string;pois:Poi[];poi_summary:PoiSummary;analysis:BusinessAnalysis|null;disclaimer:string};
 type MapStore = {name:string;location:[number,number]};
+type AiResult = {report_title:string;summary:string;primary_users:string[];age_segments:Array<{label:string;estimated_share:string;rationale:string}>;consumption_power:{level:string;score:number;rationale:string};radius_insights:string[];evidence:string[];confidence:{level:string;score:number;rationale:string};limitations:string[]};
+type AiVersion = {id:number;scope:"single"|"comparison";job_id:number|null;store_id:number|null;store_ids:number[];result:AiResult;model:string;prompt_version:string;usage:{input_tokens:number;output_tokens:number;total_tokens:number};created_at:string;store_labels?:Array<{store_id:number;label:string;name:string}>};
+type AuthUser={id:number;tenantId?:number;email:string;displayName?:string;display_name?:string;role:"admin"|"member"};
 
 const API = process.env.NEXT_PUBLIC_API_URL || "/api";
 const allCategories = ["住宅小区", "幼儿园", "小学", "购物中心", "超市", "便利店", "医院", "药店", "公园", "地铁站", "公交站", "竞品门店"];
@@ -73,13 +76,14 @@ const formatFileSize = (value:number) => value >= 1024*1024 ? `${(value/1024/102
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API}${path}`, { ...init, headers: { "Content-Type": "application/json", ...(init?.headers || {}) } });
-  const body = await res.json();
+  const raw=await res.text();let body:{success?:boolean;message?:string;data?:unknown};try{body=JSON.parse(raw)}catch{throw new Error(res.ok?"服务返回了无法识别的数据":"服务暂时不可用，请确认本机服务正在运行")}
   if (!res.ok || !body.success) throw new Error(body.message || "请求失败");
   return body.data as T;
 }
 
 export default function Page() {
-  const [tab, setTab] = useState<"single"|"batch"|"jobs">("single");
+  const [tab, setTab] = useState<"single"|"batch"|"jobs"|"admin"|"account">("single");
+  const [auth,setAuth]=useState<{loading:boolean;user:AuthUser|null}>({loading:true,user:null});
   const [mode, setMode] = useState({ mock: true, web_key: false, js_key: false });
   const [searchMode, setSearchMode] = useState<"name"|"address">("name");
   const [query, setQuery] = useState({ name: "", province:"", city: "", district: "", address: "", adcode:"" });
@@ -105,8 +109,11 @@ export default function Page() {
   const [batchProfile,setBatchProfile] = useState(true);
   const [resultTab,setResultTab] = useState<"distribution"|"profile"|"audience"|"details">("distribution");
   const [business,setBusiness] = useState<BusinessAnalysis|null>(null);
+  const [aiVersions,setAiVersions]=useState<AiVersion[]>([]);
+  const [activeAiId,setActiveAiId]=useState<number|null>(null);
 
-  useEffect(() => { request<typeof mode>("/health").then(setMode).catch(() => setError("后端服务未连接，请先启动 FastAPI 服务")); }, []);
+  useEffect(()=>{request<AuthUser>("/auth/me").then(user=>setAuth({loading:false,user})).catch(()=>setAuth({loading:false,user:null}))},[]);
+  useEffect(() => { if(auth.user)request<typeof mode>("/health").then(setMode).catch(() => setError("服务器连接异常，请联系管理员")); }, [auth.user]);
 
   const counts = useMemo(() => Object.entries(pois.reduce<Record<string, number>>((a, p) => ((a[p.category] = (a[p.category] || 0) + 1), a), {})), [pois]);
   const maxCount = Math.max(1, ...counts.map(([, n]) => n));
@@ -158,7 +165,7 @@ export default function Page() {
       const data = await request<{ job_id: number; pois: Poi[] }>(`/stores/${storeId}/poi-search`, {
         method: "POST", body: JSON.stringify({ categories, radii, max_radius: Math.max(...radii) })
       });
-      setPois(data.pois); setJobId(data.job_id); setBusiness(null); setResultTab("distribution");
+      setPois(data.pois); setJobId(data.job_id); setBusiness(null);setAiVersions([]);setActiveAiId(null); setResultTab("distribution");
     } catch (e) { setError(e instanceof Error ? e.message : "分析失败"); } finally { setBusy(""); }
   }
 
@@ -184,6 +191,11 @@ export default function Page() {
       const data=await request<BusinessAnalysis>(`/stores/${storeId}/business-district-analysis`,{method:"POST",body:JSON.stringify({radii})});
       setBusiness(data);setResultTab("audience");
     }catch(e){setError(e instanceof Error?e.message:"商圈画像生成失败")}finally{setBusy("")}
+  }
+
+  async function generateAiProfile(){
+    if(!selected)return;setBusy("ai");setError("");
+    try{const storeId=(selected as Candidate&{storeId:number}).storeId,data=await request<AiVersion>(`/stores/${storeId}/ai-analysis`,{method:"POST",body:JSON.stringify({radii})});setAiVersions(current=>[data,...current]);setActiveAiId(data.id)}catch(e){setError(e instanceof Error?e.message:"AI 人群画像生成失败")}finally{setBusy("")}
   }
 
   async function uploadFile(file: File) {
@@ -244,6 +256,9 @@ export default function Page() {
 
   function setFilteredSelection(selected:boolean){const filtered=new Set(filteredImportRows.map(row=>Number(row._row_number)));setSelectedRowNumbers(current=>selected?[...new Set([...current,...filtered])]:current.filter(row=>!filtered.has(row)))}
 
+  if(auth.loading)return <div className="auth-page"><div className="auth-card"><b>正在连接店界 POI…</b></div></div>;
+  if(!auth.user)return <LoginScreen onLogin={user=>setAuth({loading:false,user})}/>;
+  async function logout(){try{await request("/auth/logout",{method:"POST",body:"{}"})}finally{setAuth({loading:false,user:null})}}
   return (
     <div className="shell">
       <aside className="sidebar">
@@ -252,12 +267,14 @@ export default function Page() {
           <button className={tab==="single"?"active":""} onClick={()=>setTab("single")}>⌖ 单门店分析</button>
           <button className={tab==="batch"?"active":""} onClick={()=>setTab("batch")}>⇧ 批量导入</button>
           <button className={tab==="jobs"?"active":""} onClick={()=>setTab("jobs")}>▤ 分析任务</button>
+          <button className={tab==="account"?"active":""} onClick={()=>setTab("account")}>♙ 账号安全</button>
+          {auth.user.role==="admin"&&<button className={tab==="admin"?"active":""} onClick={()=>setTab("admin")}>⚙ 账号管理</button>}
         </nav>
-        <div className="side-foot"><i className={mode.web_key?"ok":""}/><div><b>{mode.mock ? "演示模式" : "真实高德模式"}</b><small>Web Key {mode.web_key?"已配置":"未配置"}</small></div></div>
+        <div className="side-foot"><i className={mode.web_key?"ok":""}/><div><b>{auth.user.displayName||auth.user.display_name||auth.user.email}</b><small>{mode.mock ? "演示模式" : "真实高德模式"} · <button onClick={logout}>退出</button></small></div></div>
       </aside>
 
       <main>
-        <header><div><h1>{tab==="single"?"单门店周边分析":tab==="batch"?"批量导入门店":"分析任务"}</h1><p>基于 GCJ-02 坐标系的设施分布分析</p></div><a className="download" href={`${API}/import/template`}>下载导入模板</a></header>
+        <header><div><h1>{tab==="single"?"单门店周边分析":tab==="batch"?"批量导入门店":tab==="admin"?"账号管理":tab==="account"?"账号安全":"分析任务"}</h1><p>基于 GCJ-02 坐标系的设施分布分析</p></div>{!(["admin","account"] as string[]).includes(tab)&&<a className="download" href={`${API}/import/template`}>下载导入模板</a>}</header>
         {mode.mock && <div className="banner">演示模式：地图及 POI 结果为明确标注的模拟数据，不代表真实高德查询结果。配置 Key 并关闭 Mock 后即可切换真实数据。</div>}
         {error && <div className="error">{error}<button onClick={()=>setError("")}>×</button></div>}
 
@@ -296,10 +313,11 @@ export default function Page() {
             <button className="primary analyze-btn" disabled={!selected||!categories.length||!radii.length||!!busy} onClick={analyze}>{busy==="poi"?"正在查询并去重…":"开始周边 POI 分析"}</button>
           </section>
 
-          {pois.length>0 && <><div className="result-tabs"><button className={resultTab==="distribution"?"on":""} onClick={()=>setResultTab("distribution")}>POI分布</button><button className={resultTab==="profile"?"on":""} onClick={()=>setResultTab("profile")}>商圈画像</button><button className={resultTab==="audience"?"on":""} onClick={()=>setResultTab("audience")}>潜在人群</button><button className={resultTab==="details"?"on":""} onClick={()=>setResultTab("details")}>POI明细</button><button className="primary profile-action" disabled={!!busy} onClick={generateBusinessProfile}>{busy==="business"?"正在查询更多特征…":business?"重新生成智能画像":"生成智能画像"}</button></div>
+          {pois.length>0 && <><div className="result-tabs"><button className={resultTab==="distribution"?"on":""} onClick={()=>setResultTab("distribution")}>POI分布</button><button className={resultTab==="profile"?"on":""} onClick={()=>setResultTab("profile")}>商圈画像</button><button className={resultTab==="audience"?"on":""} onClick={()=>setResultTab("audience")}>潜在人群</button><button className={resultTab==="details"?"on":""} onClick={()=>setResultTab("details")}>POI明细</button><button className="primary profile-action" disabled={!!busy} onClick={generateBusinessProfile}>{busy==="business"?"正在查询更多特征…":business?"重新生成规则画像":"生成规则画像"}</button><button className="primary" disabled={!!busy} onClick={generateAiProfile}>{busy==="ai"?"正在整理统计并请求 AI…":aiVersions.length?"重新生成 AI 分析":"生成 AI 分析"}</button></div>
+          {aiVersions.length>0&&<AiReport version={aiVersions.find(item=>item.id===(activeAiId||aiVersions[0].id))||aiVersions[0]} versions={aiVersions} onSelect={setActiveAiId}/>}
           {resultTab==="distribution"&&<section className="results">
             <div className="panel map-panel"><div className="panel-head"><div><h2>设施分布地图</h2><p>圆圈表示系统分析圈层，不代表高德官方商圈边界</p></div><div className="legend"><i/>门店 <i/>POI</div></div>
-              <PoiMap key={`${selected.name}-${selected.location.join("-")}`} store={selected} pois={pois} radii={radii}/>
+              <PoiMap key={`${selected!.name}-${selected!.location.join("-")}`} store={selected!} pois={pois} radii={radii}/>
             </div>
             <div className="panel chart"><div className="panel-head"><div><h2>分类统计</h2><p>共 {pois.length} 个已去重 POI</p></div></div>
               {counts.map(([name,n])=><div className="bar" key={name}><span>{name}</span><div><i style={{width:`${n/maxCount*100}%`}}/></div><b>{n}</b></div>)}
@@ -349,9 +367,31 @@ export default function Page() {
         </section>}
 
         {tab==="jobs" && <Jobs api={API} focusJobId={batchJob?.job_id||null}/>}
+        {tab==="admin"&&auth.user.role==="admin"&&<AdminUsers/>}
+        {tab==="account"&&<AccountSecurity onChanged={()=>setAuth({loading:false,user:null})}/>}
       </main>
     </div>
   );
+}
+
+function LoginScreen({onLogin}:{onLogin:(user:AuthUser)=>void}){
+  const [email,setEmail]=useState(""),[password,setPassword]=useState(""),[busy,setBusy]=useState(false),[error,setError]=useState("");
+  async function submit(event:React.FormEvent){event.preventDefault();setBusy(true);setError("");try{onLogin(await request<AuthUser>("/auth/login",{method:"POST",body:JSON.stringify({email,password})}))}catch(e){setError(e instanceof Error?e.message:"登录失败")}finally{setBusy(false)}}
+  return <div className="auth-page"><form className="auth-card" onSubmit={submit}><div className="auth-brand">界</div><h1>登录店界 POI</h1><p>门店周边设施与潜在人群分析平台</p>{error&&<div className="error">{error}</div>}<label>邮箱<input type="email" autoComplete="username" value={email} onChange={e=>setEmail(e.target.value)} required/></label><label>密码<input type="password" autoComplete="current-password" value={password} onChange={e=>setPassword(e.target.value)} required/></label><button className="primary" disabled={busy}>{busy?"正在登录…":"登录"}</button><small>账号由系统管理员创建</small></form></div>
+}
+
+function AdminUsers(){
+  const [users,setUsers]=useState<Array<{id:number;email:string;display_name:string;role:string;active:boolean;created_at:string}>>([]),[form,setForm]=useState({display_name:"",email:"",password:"",role:"member"}),[notice,setNotice]=useState(""),[busy,setBusy]=useState(false);
+  async function load(){try{setUsers(await request("/admin/users") as typeof users)}catch(e){setNotice(e instanceof Error?e.message:"账号加载失败")}}
+  useEffect(()=>{let active=true;const timer=window.setTimeout(()=>{void request("/admin/users").then(data=>{if(active)setUsers(data as typeof users)}).catch(e=>{if(active)setNotice(e instanceof Error?e.message:"账号加载失败")})},0);return()=>{active=false;window.clearTimeout(timer)}},[]);
+  async function create(event:React.FormEvent){event.preventDefault();setBusy(true);setNotice("");try{await request("/admin/users",{method:"POST",body:JSON.stringify(form)});setForm({display_name:"",email:"",password:"",role:"member"});setNotice("账号创建成功");await load()}catch(e){setNotice(e instanceof Error?e.message:"账号创建失败")}finally{setBusy(false)}}
+  return <div className="admin-grid"><form className="panel admin-form" onSubmit={create}><h2>创建使用账号</h2><p>同一组织内用户可以协作查看门店分析任务。</p>{notice&&<div className="job-notice">{notice}</div>}<label>姓名<input value={form.display_name} onChange={e=>setForm({...form,display_name:e.target.value})} required/></label><label>邮箱<input type="email" value={form.email} onChange={e=>setForm({...form,email:e.target.value})} required/></label><label>初始密码<input type="password" minLength={10} value={form.password} onChange={e=>setForm({...form,password:e.target.value})} required/><small>至少 10 位，建议用户首次登录后更换</small></label><label>权限<select value={form.role} onChange={e=>setForm({...form,role:e.target.value})}><option value="member">普通成员</option><option value="admin">管理员</option></select></label><button className="primary" disabled={busy}>{busy?"正在创建…":"创建账号"}</button></form><section className="panel"><div className="panel-head"><div><h2>组织账号</h2><p>共 {users.length} 个账号</p></div></div><div className="table-wrap"><table><thead><tr><th>姓名</th><th>邮箱</th><th>角色</th><th>状态</th><th>创建时间</th></tr></thead><tbody>{users.map(user=><tr key={user.id}><td>{user.display_name}</td><td>{user.email}</td><td>{user.role==="admin"?"管理员":"成员"}</td><td>{user.active?"启用":"停用"}</td><td>{new Date(user.created_at).toLocaleDateString("zh-CN")}</td></tr>)}</tbody></table></div></section></div>
+}
+
+function AccountSecurity({onChanged}:{onChanged:()=>void}){
+  const [form,setForm]=useState({current_password:"",new_password:"",confirm:""}),[busy,setBusy]=useState(false),[notice,setNotice]=useState("");
+  async function submit(event:React.FormEvent){event.preventDefault();if(form.new_password!==form.confirm)return setNotice("两次输入的新密码不一致");setBusy(true);setNotice("");try{await request("/auth/change-password",{method:"POST",body:JSON.stringify({current_password:form.current_password,new_password:form.new_password})});onChanged()}catch(e){setNotice(e instanceof Error?e.message:"密码修改失败")}finally{setBusy(false)}}
+  return <form className="panel admin-form account-form" onSubmit={submit}><h2>修改登录密码</h2><p>修改成功后，所有设备会退出登录。</p>{notice&&<div className="job-notice">{notice}</div>}<label>当前密码<input type="password" autoComplete="current-password" value={form.current_password} onChange={e=>setForm({...form,current_password:e.target.value})} required/></label><label>新密码<input type="password" autoComplete="new-password" minLength={12} value={form.new_password} onChange={e=>setForm({...form,new_password:e.target.value})} required/><small>至少 12 位，建议包含大小写字母、数字和符号</small></label><label>确认新密码<input type="password" autoComplete="new-password" minLength={12} value={form.confirm} onChange={e=>setForm({...form,confirm:e.target.value})} required/></label><button className="primary" disabled={busy}>{busy?"正在修改…":"修改密码"}</button></form>
 }
 
 function Jobs({api,focusJobId}:{api:string;focusJobId:number|null}) {
@@ -365,15 +405,18 @@ function Jobs({api,focusJobId}:{api:string;focusJobId:number|null}) {
   const [detail,setDetail]=useState<BatchStoreDetail|null>(null);
   const [jobBusy,setJobBusy]=useState("");
   const [notice,setNotice]=useState("");
+  const [aiComparisons,setAiComparisons]=useState<AiVersion[]>([]);
+  const [activeAiComparisonId,setActiveAiComparisonId]=useState<number|null>(null);
   const [filters,setFilters]=useState({keyword:"",city:"",district:"",type:"",level:"",lowConfidence:false});
-  async function apiRequest(path:string,init?:RequestInit){const response=await fetch(`${api}${path}`,{...init,headers:{"Content-Type":"application/json",...(init?.headers||{})}});const body=await response.json();if(!response.ok||!body.success)throw new Error(body.message||"操作失败");return body.data}
+  async function apiRequest(path:string,init?:RequestInit){const response=await fetch(`${api}${path}`,{...init,headers:{"Content-Type":"application/json",...(init?.headers||{})}});const raw=await response.text();let body:{success?:boolean;message?:string;data?:unknown};try{body=JSON.parse(raw)}catch{throw new Error("服务暂时不可用，请确认本机服务正在运行")};if(!response.ok||!body.success)throw new Error(body.message||"操作失败");return body.data}
   async function loadJobs(){try{const data=await apiRequest("/analysis-jobs") as JobRecord[];setJobs(data);setCurrentJobId(current=>focusJobId||current||data.find(job=>["正在匹配门店","正在完整分析","已暂停"].includes(job.status))?.id||data[0]?.id||null)}catch(e){setNotice(e instanceof Error?e.message:"任务加载失败")}}
   useEffect(()=>{let active=true;const refresh=async()=>{try{const response=await fetch(`${api}/analysis-jobs`);const body=await response.json();const data=(body.data||[]) as JobRecord[];if(active){setJobs(data);setCurrentJobId(current=>focusJobId||current||data.find(job=>["正在匹配门店","正在完整分析","已暂停"].includes(job.status))?.id||data[0]?.id||null)}}catch{}};const initial=window.setTimeout(()=>void refresh(),0);const timer=window.setInterval(()=>void refresh(),4000);return()=>{active=false;window.clearTimeout(initial);window.clearInterval(timer)}},[api,focusJobId]);
   useEffect(()=>{if(!currentJobId)return;let active=true;const fetchData=async(path:string)=>{const response=await fetch(`${api}${path}`);const body=await response.json();return body.data};const refresh=async()=>{try{const [job,stores]=await Promise.all([fetchData(`/analysis-jobs/${currentJobId}`),fetchData(`/analysis-jobs/${currentJobId}/stores`)]);if(active){setCurrentJob(job as JobRecord);setJobStores(stores as typeof jobStores);setJobs(current=>current.map(item=>item.id===(job as JobRecord).id?job as JobRecord:item))}}catch{}};const initial=window.setTimeout(()=>void refresh(),0);const timer=window.setInterval(()=>void refresh(),2000);return()=>{active=false;window.clearTimeout(initial);window.clearInterval(timer)}},[api,currentJobId]);
-  async function loadResults(id:number){setCurrentJobId(id);setActiveJob(id);setDetail(null);setJobBusy("load");setNotice("");try{const data=await apiRequest(`/analysis-jobs/${id}/business-district-results`) as BatchResult[];setResults(data);setComparisonIds(data.slice(0,Math.min(12,data.length)).map(item=>item.store.id))}catch(e){setResults([]);setComparisonIds([]);setNotice(e instanceof Error?e.message:"结果加载失败")}finally{setJobBusy("")}}
+  async function loadResults(id:number){setCurrentJobId(id);setActiveJob(id);setDetail(null);setJobBusy("load");setNotice("");try{const [data,history]=await Promise.all([apiRequest(`/analysis-jobs/${id}/business-district-results`) as Promise<BatchResult[]>,apiRequest(`/analysis-jobs/${id}/ai-comparisons`) as Promise<AiVersion[]>]);setResults(data);setComparisonIds(data.slice(0,Math.min(10,data.length)).map(item=>item.store.id));setAiComparisons(history);setActiveAiComparisonId(history[0]?.id||null)}catch(e){setResults([]);setComparisonIds([]);setAiComparisons([]);setNotice(e instanceof Error?e.message:"结果加载失败")}finally{setJobBusy("")}}
   async function loadDetail(jobId:number,storeId:number){setJobBusy(`detail-${storeId}`);setNotice("");try{setDetail(await apiRequest(`/analysis-jobs/${jobId}/stores/${storeId}`) as BatchStoreDetail);window.setTimeout(()=>document.querySelector(".batch-store-detail")?.scrollIntoView({behavior:"smooth",block:"start"}),50)}catch(e){setNotice(e instanceof Error?e.message:"门店详情加载失败")}finally{setJobBusy("")}}
-  async function taskAction(id:number,name:"start-matching"|"start-analysis"|"pause"|"resume"|"end"|"retry"){setCurrentJobId(id);setJobBusy(`${name}-${id}`);setNotice("");try{const data=await apiRequest(`/analysis-jobs/${id}/${name}`,{method:"POST",body:"{}"});if(name==="retry"){await apiRequest(`/analysis-jobs/${id}/start-matching`,{method:"POST",body:"{}"});setNotice("失败门店已重新加入连续匹配任务")}else{setNotice(name==="start-matching"?"已开始连续匹配全部门店，可离开页面后再回来查看进度。":name==="start-analysis"?"已开始连续完整分析，完成后可直接查看详情与对比。":name==="pause"?"任务将在当前门店处理完成后暂停。":name==="resume"?"任务已继续。":"任务已结束，已完成结果会保留。");if(data?.id)setCurrentJob(data as JobRecord)}await loadJobs()}catch(e){setNotice(e instanceof Error?e.message:"操作失败")}finally{setJobBusy("")}}
+  async function taskAction(id:number,name:"start-matching"|"start-analysis"|"pause"|"resume"|"end"|"retry"){setCurrentJobId(id);setJobBusy(`${name}-${id}`);setNotice("");try{const data=await apiRequest(`/analysis-jobs/${id}/${name}`,{method:"POST",body:"{}"}) as Partial<JobRecord>;if(name==="retry"){await apiRequest(`/analysis-jobs/${id}/start-matching`,{method:"POST",body:"{}"});setNotice("失败门店已重新加入连续匹配任务")}else{setNotice(name==="start-matching"?"已开始连续匹配全部门店，可离开页面后再回来查看进度。":name==="start-analysis"?"已开始连续完整分析，完成后可直接查看详情与对比。":name==="pause"?"任务将在当前门店处理完成后暂停。":name==="resume"?"任务已继续。":"任务已结束，已完成结果会保留。");if(data.id)setCurrentJob(data as JobRecord)}await loadJobs()}catch(e){setNotice(e instanceof Error?e.message:"操作失败")}finally{setJobBusy("")}}
   function toggleComparison(storeId:number){if(comparisonIds.includes(storeId))return setComparisonIds(comparisonIds.filter(id=>id!==storeId));if(comparisonIds.length>=12)return setNotice("重点对比最多选择 12 家门店");setComparisonIds([...comparisonIds,storeId])}
+  async function generateAiComparison(){if(!activeJob)return;if(comparisonIds.length<2||comparisonIds.length>10){setNotice("AI 对比请选择 2–10 家门店");return}setJobBusy("ai-compare");setNotice("");try{const data=await apiRequest(`/analysis-jobs/${activeJob}/ai-comparison`,{method:"POST",body:JSON.stringify({store_ids:comparisonIds})}) as AiVersion;setAiComparisons(current=>[data,...current]);setActiveAiComparisonId(data.id);setNotice("多店 AI 对比已生成并保存为新版本")}catch(e){setNotice(e instanceof Error?e.message:"多店 AI 对比失败")}finally{setJobBusy("")}}
   const keyword=filters.keyword.trim().toLowerCase();
   const visible=results.filter(x=>(!keyword||`${x.store.input_name} ${x.store.standard_name||""} ${x.store.address||""}`.toLowerCase().includes(keyword))&&(!filters.city||x.store?.city===filters.city)&&(!filters.district||x.store?.district===filters.district)&&(!filters.type||x.business_district_type.type===filters.type)&&(!filters.level||x.level.level===filters.level)&&(!filters.lowConfidence||x.confidence_level==="低"));
   const compared=results.filter(item=>comparisonIds.includes(item.store.id));
@@ -390,26 +433,42 @@ function Jobs({api,focusJobId}:{api:string;focusJobId:number|null}) {
     {activeJob&&<div className="batch-compare"><div className="panel-head"><div><h2>任务 #{activeJob} 门店分析与对比</h2><p>共 {visible.length} 家已完成分析；可勾选 2–12 家进行重点对比。</p></div><div className="report-actions"><a className="download" href={`${api}/analysis-jobs/${activeJob}/business-district-export`}>导出画像报告</a><a className="download" href={`${api}/analysis-jobs/${activeJob}/export`}>导出完整总报告</a></div></div>
       <div className="compare-filters"><input placeholder="搜索门店或地址" value={filters.keyword} onChange={e=>setFilters({...filters,keyword:e.target.value})}/><input placeholder="城市" value={filters.city} onChange={e=>setFilters({...filters,city:e.target.value})}/><input placeholder="区县" value={filters.district} onChange={e=>setFilters({...filters,district:e.target.value})}/><select value={filters.type} onChange={e=>setFilters({...filters,type:e.target.value})}><option value="">全部商圈类型</option>{[...new Set(results.map(x=>x.business_district_type.type))].map(x=><option key={x}>{x}</option>)}</select><select value={filters.level} onChange={e=>setFilters({...filters,level:e.target.value})}><option value="">全部能级</option>{["S","A","B","C","D"].map(x=><option key={x}>{x}</option>)}</select><label><input type="checkbox" checked={filters.lowConfidence} onChange={e=>setFilters({...filters,lowConfidence:e.target.checked})}/>只看低可信度</label></div>
       {jobBusy==="load"?<p>正在加载…</p>:visible.length===0?<div className="empty"><b>暂无完整分析结果</b><p>点击任务上的“运行完整分析”，系统会逐店查询 POI 并生成画像。</p></div>:<div className="table-wrap compare-table"><table><thead><tr><th>重点对比</th><th>门店</th><th>POI总量</th><th>商圈类型</th><th>能级</th><th>适配度</th><th>竞争压力</th><th>主要潜在人群</th><th>消费指数</th><th>可信度</th><th>操作</th></tr></thead><tbody>{visible.map(x=><tr key={x.id}><td><input aria-label={`选择${x.store.input_name}进行对比`} type="checkbox" checked={comparisonIds.includes(x.store.id)} onChange={()=>toggleComparison(x.store.id)}/></td><td><b>{x.store.input_name}</b><small>{x.store.city} · {x.store.district}</small></td><td><b>{x.poi_summary?.total||0}</b><small>{Object.entries(x.poi_summary?.by_category||{}).slice(0,2).map(([name,count])=>`${name}${count}`).join(" · ")}</small></td><td>{x.business_district_type.type}</td><td>{x.level.level} · {x.level.score}</td><td>{x.fit.score}</td><td>{x.competition.level}</td><td>{x.audience_profile?.primary_groups?.map(group=>group.label).join(" + ")||"需重新分析"}</td><td>{x.audience_profile?.consumption_power?.index??"—"}</td><td>{x.confidence_level}</td><td><button onClick={()=>loadDetail(activeJob,x.store.id)}>{jobBusy===`detail-${x.store.id}`?"加载中…":"查看详情"}</button></td></tr>)}</tbody></table></div>}
-      {compared.length>0&&<div className="focus-compare"><div className="compare-title"><div><h3>重点门店横向对比</h3><p>已选择 {compared.length} / 12 家；建议至少选择 2 家。</p></div><button className="text-btn" onClick={()=>setComparisonIds([])}>清空选择</button></div><div className="compare-cards">{compared.map(item=><article key={item.store.id}><h4>{item.store.input_name}</h4><p>{item.store.district} · {item.business_district_type.type}</p><dl><div><dt>POI 总量</dt><dd>{item.poi_summary.total}</dd></div><div><dt>商圈能级</dt><dd>{item.level.level} / {item.level.score}</dd></div><div><dt>适配度</dt><dd>{item.fit.score}</dd></div><div><dt>竞争压力</dt><dd>{item.competition.level}</dd></div><div><dt>消费指数</dt><dd>{item.audience_profile?.consumption_power?.index??"—"}</dd></div><div><dt>主要年龄</dt><dd>{item.audience_profile?.primary_groups?.map(group=>group.age_range).join("、")||"—"}</dd></div></dl><button className="outline" onClick={()=>loadDetail(activeJob,item.store.id)}>查看完整详情</button></article>)}</div></div>}
+      {compared.length>0&&<div className="focus-compare"><div className="compare-title"><div><h3>重点门店横向对比</h3><p>已选择 {compared.length} / 12 家；AI 对比支持 2–10 家。</p></div><div className="report-actions"><button className="primary" disabled={comparisonIds.length<2||comparisonIds.length>10||jobBusy==="ai-compare"} onClick={generateAiComparison}>{jobBusy==="ai-compare"?"正在进行 AI 对比…":"生成多店 AI 对比"}</button><button className="text-btn" onClick={()=>setComparisonIds([])}>清空选择</button></div></div><div className="compare-cards">{compared.map(item=><article key={item.store.id}><h4>{item.store.input_name}</h4><p>{item.store.district} · {item.business_district_type.type}</p><dl><div><dt>POI 总量</dt><dd>{item.poi_summary.total}</dd></div><div><dt>商圈能级</dt><dd>{item.level.level} / {item.level.score}</dd></div><div><dt>适配度</dt><dd>{item.fit.score}</dd></div><div><dt>竞争压力</dt><dd>{item.competition.level}</dd></div><div><dt>消费指数</dt><dd>{item.audience_profile?.consumption_power?.index??"—"}</dd></div><div><dt>主要年龄</dt><dd>{item.audience_profile?.primary_groups?.map(group=>group.age_range).join("、")||"—"}</dd></div></dl><button className="outline" onClick={()=>loadDetail(activeJob,item.store.id)}>查看完整详情</button></article>)}</div></div>}
+      {aiComparisons.length>0&&<AiReport version={aiComparisons.find(item=>item.id===(activeAiComparisonId||aiComparisons[0].id))||aiComparisons[0]} versions={aiComparisons} onSelect={setActiveAiComparisonId}/>}
     </div>}
     {detail&&activeJob&&<BatchStoreDetailView detail={detail} api={api} onClose={()=>setDetail(null)}/>}
   </section>
 }
 
 function BatchStoreDetailView({detail,api,onClose}:{detail:BatchStoreDetail;api:string;onClose:()=>void}) {
-  const [tab,setTab]=useState<"distribution"|"profile"|"audience"|"details">("distribution");
+  const [tab,setTab]=useState<"distribution"|"profile"|"audience"|"ai"|"details">("distribution");
+  const [aiVersions,setAiVersions]=useState<AiVersion[]>([]),[activeAiId,setActiveAiId]=useState<number|null>(null),[aiBusy,setAiBusy]=useState(false),[aiError,setAiError]=useState("");
+  useEffect(()=>{let active=true;void fetch(`${api}/stores/${detail.store.id}/ai-analyses`).then(response=>response.json()).then(body=>{if(active&&body.success){setAiVersions(body.data);setActiveAiId(body.data[0]?.id||null)}}).catch(()=>{});return()=>{active=false}},[api,detail.store.id]);
+  async function generateDetailAi(){setAiBusy(true);setAiError("");try{const response=await fetch(`${api}/stores/${detail.store.id}/ai-analysis`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({radii:detail.job.config?.radii||defaultRadii})}),raw=await response.text();let body:{success?:boolean;message?:string;data?:AiVersion};try{body=JSON.parse(raw)}catch{throw new Error("服务暂时不可用")};if(!response.ok||!body.success||!body.data)throw new Error(body.message||"AI 分析失败");setAiVersions(current=>[body.data as AiVersion,...current]);setActiveAiId(body.data.id)}catch(e){setAiError(e instanceof Error?e.message:"AI 分析失败")}finally{setAiBusy(false)}}
   const counts=Object.entries(detail.poi_summary.by_category).sort((a,b)=>b[1]-a[1]);
   const max=Math.max(1,...counts.map(([,value])=>value));
   const storeForMap:MapStore={name:detail.store.standard_name||detail.store.input_name,location:[detail.store.longitude||0,detail.store.latitude||0]};
   return <div className="batch-store-detail">
     <div className="detail-hero"><div><small>任务 #{detail.job.id} · 单店完整报告</small><h2>{detail.store.input_name}</h2><p>{detail.store.city} · {detail.store.district}　{detail.store.address}</p><span>高德标准名称：{detail.store.standard_name||"—"}　匹配分：{detail.store.match_score??"—"}</span></div><div className="report-actions"><a className="download" href={`${api}/analysis-jobs/${detail.job.id}/stores/${detail.store.id}/export`}>导出本店报告</a><button onClick={onClose}>关闭详情</button></div></div>
     <div className="detail-kpis"><div><small>任务内 POI</small><b>{detail.poi_summary.total}</b></div><div><small>已分析分类</small><b>{counts.length}</b></div><div><small>商圈类型</small><b>{detail.analysis?.business_district_type.type||"—"}</b></div><div><small>消费环境指数</small><b>{detail.analysis?.audience_profile?.consumption_power.index??"—"}</b></div><div><small>分析可信度</small><b>{detail.analysis?.confidence_level||"—"}</b></div></div>
-    <div className="result-tabs detail-tabs"><button className={tab==="distribution"?"on":""} onClick={()=>setTab("distribution")}>POI分布</button><button className={tab==="profile"?"on":""} onClick={()=>setTab("profile")}>商圈画像</button><button className={tab==="audience"?"on":""} onClick={()=>setTab("audience")}>潜在人群</button><button className={tab==="details"?"on":""} onClick={()=>setTab("details")}>POI明细</button></div>
+    <div className="result-tabs detail-tabs"><button className={tab==="distribution"?"on":""} onClick={()=>setTab("distribution")}>POI分布</button><button className={tab==="profile"?"on":""} onClick={()=>setTab("profile")}>商圈画像</button><button className={tab==="audience"?"on":""} onClick={()=>setTab("audience")}>规则潜在人群</button><button className={tab==="ai"?"on":""} onClick={()=>setTab("ai")}>AI人群分析</button><button className={tab==="details"?"on":""} onClick={()=>setTab("details")}>POI明细</button></div>
     {tab==="distribution"&&<section className="results"><div className="panel map-panel"><div className="panel-head"><div><h2>本店设施分布地图</h2><p>{detail.job.config?.radii?.map(formatRadius).join("、")} 分析圈层</p></div><div className="legend"><i/>门店 <i/>POI</div></div><PoiMap key={detail.store.id} store={storeForMap} pois={detail.pois} radii={detail.job.config?.radii||defaultRadii}/></div><div className="panel chart"><div className="panel-head"><div><h2>分类统计</h2><p>仅统计任务 #{detail.job.id} 的 POI</p></div></div>{counts.map(([name,value])=><div className="bar" key={name}><span>{name}</span><div><i style={{width:`${value/max*100}%`}}/></div><b>{value}</b></div>)}<div className="disclaimer">{detail.disclaimer}</div></div></section>}
     {tab==="profile"&&<BusinessProfile data={detail.analysis} onGenerate={()=>{}} busy={false}/>}
     {tab==="audience"&&<AudienceProfile data={detail.analysis?.audience_profile||null} onGenerate={()=>{}} busy={false}/>}
+    {tab==="ai"&&<>{aiError&&<div className="error">{aiError}</div>}<div className="panel ai-launch"><div><h2>DeepSeek 人群画像</h2><p>仅发送匿名、聚合后的 POI 数量与圈层统计。</p></div><button className="primary" disabled={aiBusy} onClick={generateDetailAi}>{aiBusy?"正在整理统计并请求 AI…":aiVersions.length?"重新生成 AI 分析":"生成 AI 分析"}</button></div>{aiVersions.length>0&&<AiReport version={aiVersions.find(item=>item.id===(activeAiId||aiVersions[0].id))||aiVersions[0]} versions={aiVersions} onSelect={setActiveAiId}/>}</>}
     {tab==="details"&&<section className="panel table-panel"><div className="panel-head"><div><h2>本店 POI 明细</h2><p>共 {detail.pois.length} 条，按直线距离排序</p></div><a className="download" href={`${api}/analysis-jobs/${detail.job.id}/stores/${detail.store.id}/export`}>导出本店报告</a></div><div className="table-wrap"><table><thead><tr><th>POI 名称</th><th>分类</th><th>地址</th><th>直线距离</th><th>距离层级</th></tr></thead><tbody>{detail.pois.map((poi,index)=><tr key={`${poi.id}-${poi.category}-${index}`}><td>{poi.name}</td><td><span className="tag">{poi.category}</span></td><td>{poi.address}</td><td>{poi.distance} m</td><td>{poi.distance_bucket}</td></tr>)}</tbody></table></div></section>}
   </div>
+}
+
+function AiReport({version,versions,onSelect}:{version:AiVersion;versions:AiVersion[];onSelect:(id:number)=>void}){
+  const data=version.result;
+  return <section className="panel ai-report">
+    <div className="panel-head"><div><small>DeepSeek · {version.model}</small><h2>{data.report_title||"AI 潜在人群分析"}</h2><p>版本 #{version.id} · {new Date(version.created_at).toLocaleString("zh-CN")}</p></div><label className="ai-version">历史版本<select value={version.id} onChange={event=>onSelect(Number(event.target.value))}>{versions.map(item=><option key={item.id} value={item.id}>#{item.id} · {new Date(item.created_at).toLocaleString("zh-CN")}</option>)}</select></label></div>
+    <p className="ai-summary">{data.summary}</p>
+    <div className="ai-grid"><article><small>主要潜在人群</small><h3>{data.primary_users.join("、")}</h3><ul>{data.age_segments.map((item,index)=><li key={index}><b>{item.label} · {item.estimated_share}</b><span>{item.rationale}</span></li>)}</ul></article><article><small>消费能力代理判断</small><h3>{data.consumption_power.level} · {data.consumption_power.score}/100</h3><p>{data.consumption_power.rationale}</p><small>可信度</small><h3>{data.confidence.level} · {data.confidence.score}/100</h3><p>{data.confidence.rationale}</p></article></div>
+    <div className="ai-evidence"><div><h3>圈层差异</h3>{data.radius_insights.map((text,index)=><p key={index}>· {text}</p>)}</div><div><h3>数据证据</h3>{data.evidence.map((text,index)=><p key={index}>· {text}</p>)}</div></div>
+    <div className="disclaimer">{data.limitations.join("；")} 年龄与比例均为基于 POI 结构的估算，不是人口统计、收入、客流或订单事实。</div>
+  </section>
 }
 
 function BusinessProfile({data,onGenerate,busy}:{data:BusinessAnalysis|null;onGenerate:()=>void;busy:boolean}) {
@@ -471,12 +530,12 @@ function PoiMap({store,pois,radii}:{store:MapStore;pois:Poi[];radii:number[]}) {
     const draw = () => {
       const AMap = (window as Window & {AMap?: AMapApi}).AMap;
       if (!AMap || !ref.current) return;
-      map = new AMap.Map(ref.current,{zoom:14,center:displayed.store.location,viewMode:"2D"});
-      displayed.radii.forEach((radius,i)=>map.add(new AMap.Circle({center:displayed.store.location,radius,strokeColor:"#08745b",strokeOpacity:.55,strokeWeight:1,fillColor:"#67b79e",fillOpacity:.04,zIndex:10+i})));
-      map.add(new AMap.Marker({position:displayed.store.location,title:displayed.store.name,label:{content:"门店",direction:"top"},zIndex:100}));
+      const createdMap = new AMap.Map(ref.current,{zoom:14,center:displayed.store.location,viewMode:"2D"});map=createdMap;
+      displayed.radii.forEach((radius,i)=>createdMap.add(new AMap.Circle({center:displayed.store.location,radius,strokeColor:"#08745b",strokeOpacity:.55,strokeWeight:1,fillColor:"#67b79e",fillOpacity:.04,zIndex:10+i})));
+      createdMap.add(new AMap.Marker({position:displayed.store.location,title:displayed.store.name,label:{content:"门店",direction:"top"},zIndex:100}));
       const markers=displayed.pois.map(p=>new AMap.Marker({position:p.location,title:`${p.name} · ${p.distance}米`,extData:p}));
-      map.add(markers);
-      map.setFitView(markers,false,[60,60,60,60],16);
+      createdMap.add(markers);
+      createdMap.setFitView(markers,false,[60,60,60,60],16);
     };
     (window as Window & {_AMapSecurityConfig?:Record<string,string>})._AMapSecurityConfig={securityJsCode:securityCode};
     if ((window as Window & {AMap?: AMapApi}).AMap) draw();

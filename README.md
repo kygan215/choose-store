@@ -39,6 +39,10 @@ npm run dev
 
 浏览器访问前端打印的地址（默认 `http://localhost:3000`），API 文档为 `http://127.0.0.1:8000/docs`。
 
+## 单服务器正式部署
+
+约 30 名用户使用时，采用 Node/Vinext + PostgreSQL + Redis 队列 + Nginx 的 Docker Compose 正式架构。当前测试阶段只监听 HTTP 80，443 和域名由后续网关配置承担。完整步骤见 `docs/单服务器正式部署指南.md`。
+
 ## 高德 Key
 
 在高德开放平台创建应用，并分别申请：
