@@ -1,12 +1,14 @@
 FROM node:22-bookworm-slim AS dependencies
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+RUN npm ci --registry=$NPM_REGISTRY --replace-registry-host=always
 
 FROM node:22-bookworm-slim AS runtime-dependencies
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+RUN npm ci --omit=dev --registry=$NPM_REGISTRY --replace-registry-host=always
 
 FROM dependencies AS web-build
 ARG NEXT_PUBLIC_API_URL=/api
