@@ -41,7 +41,7 @@ npm run dev
 
 ## 单服务器正式部署
 
-约 30 名用户使用时，采用 Node/Vinext + PostgreSQL + Redis 队列 + Nginx 的 Docker Compose 正式架构。当前测试阶段只监听 HTTP 80，443 和域名由后续网关配置承担。完整步骤见 `docs/单服务器正式部署指南.md`。
+约 30 名用户使用时，采用 Node/Vinext + PostgreSQL + Redis 队列 + Nginx 的 Docker Compose 正式架构。当前回源端口通过 `HTTP_PORT` 配置，默认使用 HTTP 90；443 和域名由后续网关配置承担。完整步骤见 `docs/单服务器正式部署指南.md`。
 
 ## 高德 Key
 
