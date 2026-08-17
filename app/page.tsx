@@ -62,6 +62,9 @@ type MapStore = {name:string;location:[number,number]};
 type AiResult = {report_title:string;summary:string;primary_users:string[];age_segments:Array<{label:string;estimated_share:string;rationale:string}>;consumption_power:{level:string;score:number;rationale:string};radius_insights:string[];evidence:string[];confidence:{level:string;score:number;rationale:string};limitations:string[]};
 type AiVersion = {id:number;scope:"single"|"comparison";job_id:number|null;store_id:number|null;store_ids:number[];result:AiResult;model:string;prompt_version:string;usage:{input_tokens:number;output_tokens:number;total_tokens:number};created_at:string;store_labels?:Array<{store_id:number;label:string;name:string}>};
 type AuthUser={id:number;tenantId?:number;email:string;displayName?:string;display_name?:string;role:"admin"|"member"};
+type ExportField={id:string;label:string;group:string};
+type ExportOptions={jobs:JobRecord[];fields:ExportField[];required_fields:Array<{id:string;label:string}>;sheet_options:Array<{id:string;label:string}>};
+type ExportStoreItem={store:BatchStore;status:string;poi_summary:PoiSummary;has_profile:boolean;error_message?:string};
 
 const API = process.env.NEXT_PUBLIC_API_URL || "/api";
 const allCategories = ["住宅小区", "幼儿园", "小学", "购物中心", "超市", "便利店", "医院", "药店", "公园", "地铁站", "公交站", "竞品门店"];
@@ -82,7 +85,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export default function Page() {
-  const [tab, setTab] = useState<"single"|"batch"|"jobs"|"admin"|"account">("single");
+  const [tab, setTab] = useState<"single"|"batch"|"jobs"|"exports"|"admin"|"account">("single");
   const [auth,setAuth]=useState<{loading:boolean;user:AuthUser|null}>({loading:true,user:null});
   const [mode, setMode] = useState({ mock: true, web_key: false, js_key: false });
   const [searchMode, setSearchMode] = useState<"name"|"address">("name");
@@ -267,6 +270,7 @@ export default function Page() {
           <button className={tab==="single"?"active":""} onClick={()=>setTab("single")}>⌖ 单门店分析</button>
           <button className={tab==="batch"?"active":""} onClick={()=>setTab("batch")}>⇧ 批量导入</button>
           <button className={tab==="jobs"?"active":""} onClick={()=>setTab("jobs")}>▤ 分析任务</button>
+          <button className={tab==="exports"?"active":""} onClick={()=>setTab("exports")}>⇩ 批量导出</button>
           <button className={tab==="account"?"active":""} onClick={()=>setTab("account")}>♙ 账号安全</button>
           {auth.user.role==="admin"&&<button className={tab==="admin"?"active":""} onClick={()=>setTab("admin")}>⚙ 账号管理</button>}
         </nav>
@@ -274,7 +278,7 @@ export default function Page() {
       </aside>
 
       <main>
-        <header><div><h1>{tab==="single"?"单门店周边分析":tab==="batch"?"批量导入门店":tab==="admin"?"账号管理":tab==="account"?"账号安全":"分析任务"}</h1><p>基于 GCJ-02 坐标系的设施分布分析</p></div>{!(["admin","account"] as string[]).includes(tab)&&<a className="download" href={`${API}/import/template`}>下载导入模板</a>}</header>
+        <header><div><h1>{tab==="single"?"单门店周边分析":tab==="batch"?"批量导入门店":tab==="exports"?"批量导出":tab==="admin"?"账号管理":tab==="account"?"账号安全":"分析任务"}</h1><p>{tab==="exports"?"按任务、门店、分析半径和字段生成 Excel 报告":"基于 GCJ-02 坐标系的设施分布分析"}</p></div>{!(["admin","account","exports"] as string[]).includes(tab)&&<a className="download" href={`${API}/import/template`}>下载导入模板</a>}</header>
         {mode.mock && <div className="banner">演示模式：地图及 POI 结果为明确标注的模拟数据，不代表真实高德查询结果。配置 Key 并关闭 Mock 后即可切换真实数据。</div>}
         {error && <div className="error">{error}<button onClick={()=>setError("")}>×</button></div>}
 
@@ -367,11 +371,53 @@ export default function Page() {
         </section>}
 
         {tab==="jobs" && <Jobs api={API} focusJobId={batchJob?.job_id||null}/>}
+        {tab==="exports"&&<BatchExport api={API}/>}
         {tab==="admin"&&auth.user.role==="admin"&&<AdminUsers/>}
         {tab==="account"&&<AccountSecurity onChanged={()=>setAuth({loading:false,user:null})}/>}
       </main>
     </div>
   );
+}
+
+function BatchExport({api}:{api:string}){
+  const [options,setOptions]=useState<ExportOptions|null>(null),[jobIds,setJobIds]=useState<number[]>([]),[stores,setStores]=useState<ExportStoreItem[]>([]),[storeIds,setStoreIds]=useState<number[]>([]);
+  const [fields,setFields]=useState<string[]>(["city","district","status","poi_total","business_district_type","main_audience","age_ranges","consumption_level","consumption_index","analysis_confidence"]),[selectedRadii,setSelectedRadii]=useState<number[]>([]),[selectedCategories,setSelectedCategories]=useState<string[]>([]);
+  const [sheets,setSheets]=useState({poi_details:false,failures:true,notes:true}),[filter,setFilter]=useState(""),[busy,setBusy]=useState(false),[progress,setProgress]=useState(""),[notice,setNotice]=useState("");
+  useEffect(()=>{let active=true;void request<ExportOptions>("/batch-export/options").then(data=>{if(!active)return;setOptions(data);const first=data.jobs.find(job=>job.total_stores>0);if(first){setJobIds([first.id]);setSelectedRadii(first.config?.radii||[]);setSelectedCategories(first.config?.categories||[]);setProgress("正在读取所选任务的门店…")}}).catch(error=>{if(active)setNotice(error instanceof Error?error.message:"导出配置加载失败")});return()=>{active=false}},[]);
+  const selectedJobs=useMemo(()=>options?.jobs.filter(job=>jobIds.includes(job.id))||[],[options,jobIds]);
+  const availableRadii=useMemo(()=>[...new Set(selectedJobs.flatMap(job=>job.config?.radii||[]))].sort((a,b)=>a-b),[selectedJobs]);
+  const availableCategories=useMemo(()=>{const found=new Set(selectedJobs.flatMap(job=>job.config?.categories||[]));return [...allCategories.filter(category=>found.has(category)),...[...found].filter(category=>!allCategories.includes(category))]},[selectedJobs]);
+  useEffect(()=>{let active=true;if(!jobIds.length)return;Promise.all(jobIds.map(id=>request<ExportStoreItem[]>(`/analysis-jobs/${id}/stores`))).then(groups=>{if(!active)return;const rows=groups.flat();setStores(rows);setStoreIds(rows.map(item=>item.store.id));setProgress("")}).catch(error=>{if(active){setProgress("");setNotice(error instanceof Error?error.message:"门店加载失败")}});return()=>{active=false}},[jobIds]);
+  const visibleStores=useMemo(()=>{const keyword=filter.trim().toLowerCase();return stores.filter(item=>!keyword||`${item.store.input_name} ${item.store.standard_name||""} ${item.store.city||""} ${item.store.district||""} ${item.store.address||""}`.toLowerCase().includes(keyword))},[stores,filter]);
+  const fieldGroups=useMemo(()=>{const groups:Record<string,ExportField[]>={};for(const field of options?.fields||[])(groups[field.group]||=[]).push(field);return Object.entries(groups)},[options]);
+  function toggle<T extends number|string>(value:T,current:T[],setter:(next:T[])=>void){setter(current.includes(value)?current.filter(item=>item!==value):[...current,value])}
+  function toggleJob(jobId:number){const next=jobIds.includes(jobId)?jobIds.filter(id=>id!==jobId):[...jobIds,jobId],jobs=options?.jobs.filter(job=>next.includes(job.id))||[],nextRadii=[...new Set(jobs.flatMap(job=>job.config?.radii||[]))].sort((a,b)=>a-b),found=new Set(jobs.flatMap(job=>job.config?.categories||[])),nextCategories=[...allCategories.filter(category=>found.has(category)),...[...found].filter(category=>!allCategories.includes(category))];setJobIds(next);setSelectedRadii(current=>{const kept=current.filter(radius=>nextRadii.includes(radius));return kept.length?kept:nextRadii});setSelectedCategories(current=>{const kept=current.filter(category=>nextCategories.includes(category));return kept.length?kept:nextCategories});setProgress(next.length?"正在读取所选任务的门店…":"");if(!next.length){setStores([]);setStoreIds([])}}
+  function toggleVisibleStores(select:boolean){const visibleIds=new Set(visibleStores.map(item=>item.store.id));setStoreIds(current=>select?[...new Set([...current,...visibleIds])]:current.filter(id=>!visibleIds.has(id)))}
+  async function exportFile(){
+    if(!jobIds.length||!storeIds.length||!selectedRadii.length||!selectedCategories.length){setNotice("请至少选择一个任务、一家门店、一个分析半径和一个 POI 分类");return}
+    setBusy(true);setNotice("");let handle:{createWritable:()=>Promise<{write:(value:Blob)=>Promise<void>;close:()=>Promise<void>}>}|null=null;
+    const suggestedName=`门店POI批量导出_${new Date().toISOString().slice(0,10)}.xlsx`;
+    try{
+      const picker=(window as Window&{showSaveFilePicker?:(options:unknown)=>Promise<typeof handle>}).showSaveFilePicker;
+      if(picker){setProgress("请选择本机保存位置…");try{handle=await picker({suggestedName,types:[{description:"Excel 工作簿",accept:{"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":[".xlsx"]}}]})}catch(error){if((error as DOMException)?.name==="AbortError"){setProgress("");return}}
+      }
+      setProgress("正在统计圈层 POI 并生成 Excel…");const response=await fetch(`${api}/batch-export`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({job_ids:jobIds,store_ids:storeIds,fields,radii:selectedRadii,categories:selectedCategories,include_poi_details:sheets.poi_details,include_failures:sheets.failures,include_notes:sheets.notes})});
+      if(!response.ok){const raw=await response.text();try{throw new Error(JSON.parse(raw).message||"导出失败")}catch(error){if(error instanceof SyntaxError)throw new Error("导出服务返回异常");throw error}}
+      const blob=await response.blob();if(handle){const writable=await handle.createWritable();await writable.write(blob);await writable.close()}else{const url=URL.createObjectURL(blob),anchor=document.createElement("a");anchor.href=url;anchor.download=suggestedName;document.body.appendChild(anchor);anchor.click();anchor.remove();window.setTimeout(()=>URL.revokeObjectURL(url),1000)}
+      setNotice(`导出成功：已生成 ${storeIds.length} 家门店、${selectedRadii.length*selectedCategories.length} 个圈层统计字段。`);
+    }catch(error){setNotice(error instanceof Error?error.message:"导出失败，请稍后重试")}finally{setBusy(false);setProgress("")}
+  }
+  return <section className="export-workspace">
+    {notice&&<div className="job-notice">{notice}</div>}{progress&&<div className="export-progress"><i/><span>{progress}</span></div>}
+    <div className="export-intro panel"><div><small>账号数据隔离已启用</small><h2>生成门店分析 Excel</h2><p>门店名称和门店地址固定导出；其他字段、圈层和附加工作表可自由选择。</p></div><div><b>{storeIds.length}</b><span>家已选门店</span></div></div>
+    <section className="panel export-step"><div className="section-title"><span>01</span><div><h2>选择分析任务</h2><p>这里只显示当前登录账号创建的任务</p></div></div>
+      {!options?<p>正在加载任务…</p>:options.jobs.length===0?<div className="empty"><b>暂无可导出任务</b><p>请先完成单店分析或批量分析。</p></div>:<div className="export-job-list">{options.jobs.map(job=><label key={job.id} className={jobIds.includes(job.id)?"selected":""}><input type="checkbox" checked={jobIds.includes(job.id)} onChange={()=>toggleJob(job.id)}/><span><b>任务 #{job.id} · {job.filename||"单门店任务"}</b><small>{job.status} · {job.total_stores} 家 · {new Date(job.created_at).toLocaleString("zh-CN")}</small></span><em>{(job.config?.radii||[]).map(formatRadius).join("、")||"无圈层"}</em></label>)}</div>}
+    </section>
+    <section className="panel export-step"><div className="section-title"><span>02</span><div><h2>选择门店</h2><p>默认全选所选任务中的门店，可搜索后批量调整</p></div></div><div className="export-tools"><input value={filter} onChange={event=>setFilter(event.target.value)} placeholder="搜索门店名称、城市、区县或地址"/><b>已选 {storeIds.length} / {stores.length} 家</b><button onClick={()=>toggleVisibleStores(true)}>全选筛选结果</button><button onClick={()=>toggleVisibleStores(false)}>取消筛选结果</button></div><div className="export-store-list">{visibleStores.map(item=><label key={item.store.id}><input type="checkbox" checked={storeIds.includes(item.store.id)} onChange={()=>toggle(item.store.id,storeIds,setStoreIds)}/><span><b>{item.store.standard_name||item.store.input_name}</b><small>{item.store.city} · {item.store.district}　{item.store.address||"地址未记录"}</small></span><em>{item.status}</em></label>)}</div></section>
+    <section className="panel export-step"><div className="section-title"><span>03</span><div><h2>选择导出字段</h2><p>必选字段不可取消；可选字段按用途分组</p></div></div><div className="required-fields"><label><input type="checkbox" checked disabled readOnly/>门店名称 <small>必选</small></label><label><input type="checkbox" checked disabled readOnly/>门店地址 <small>必选</small></label></div><div className="export-field-groups">{fieldGroups.map(([group,items])=><div key={group}><h3>{group}</h3>{items.map(field=><label key={field.id}><input type="checkbox" checked={fields.includes(field.id)} onChange={()=>toggle(field.id,fields,setFields)}/>{field.label}</label>)}</div>)}</div></section>
+    <section className="panel export-step"><div className="section-title"><span>04</span><div><h2>选择 POI 圈层字段</h2><p>字段名称会自动组合为“500米住宅小区数量”等明确口径</p></div></div><div className="export-radius-category"><div><h3>分析半径</h3>{availableRadii.length>1&&<p>检测到多个分析圈层，请勾选需要导出的范围。</p>}<div className="chips">{availableRadii.map(radius=><button key={radius} className={selectedRadii.includes(radius)?"on":""} onClick={()=>toggle(radius,selectedRadii,setSelectedRadii)}>{formatRadius(radius)}</button>)}</div></div><div><h3>POI 分类</h3><div className="category-grid">{availableCategories.map(category=><label key={category}><input type="checkbox" checked={selectedCategories.includes(category)} onChange={()=>toggle(category,selectedCategories,setSelectedCategories)}/><span>{category}</span></label>)}</div></div></div><div className="field-preview"><b>将生成 {selectedRadii.length*selectedCategories.length} 个 POI 数量字段</b><span>{selectedRadii.slice(0,2).flatMap(radius=>selectedCategories.slice(0,3).map(category=>`${formatRadius(radius).replace(" ","")}${category}数量`)).join("、")}{selectedRadii.length*selectedCategories.length>6?"……":""}</span></div></section>
+    <section className="panel export-step"><div className="section-title"><span>05</span><div><h2>附加工作表与保存</h2><p>汇总表始终生成，其他工作表按需添加</p></div></div><div className="sheet-options"><label><input type="checkbox" checked={sheets.poi_details} onChange={event=>setSheets({...sheets,poi_details:event.target.checked})}/><span><b>POI 明细</b><small>逐条导出名称、分类、地址、距离和坐标，文件会明显增大</small></span></label><label><input type="checkbox" checked={sheets.failures} onChange={event=>setSheets({...sheets,failures:event.target.checked})}/><span><b>失败与未完成门店</b><small>便于后续补录地址或重试</small></span></label><label><input type="checkbox" checked={sheets.notes} onChange={event=>setSheets({...sheets,notes:event.target.checked})}/><span><b>导出说明</b><small>记录圈层口径、来源任务、导出账号和数据限制</small></span></label></div><div className="export-submit"><div><b>准备导出 {storeIds.length} 家门店</b><span>浏览器支持时可直接选择本机保存路径，否则使用系统默认下载目录。</span></div><button className="primary" disabled={busy||!jobIds.length||!storeIds.length||!selectedRadii.length||!selectedCategories.length} onClick={exportFile}>{busy?"正在生成 Excel…":"选择保存位置并导出"}</button></div></section>
+  </section>
 }
 
 function LoginScreen({onLogin}:{onLogin:(user:AuthUser)=>void}){
@@ -385,7 +431,7 @@ function AdminUsers(){
   async function load(){try{setUsers(await request("/admin/users") as typeof users)}catch(e){setNotice(e instanceof Error?e.message:"账号加载失败")}}
   useEffect(()=>{let active=true;const timer=window.setTimeout(()=>{void request("/admin/users").then(data=>{if(active)setUsers(data as typeof users)}).catch(e=>{if(active)setNotice(e instanceof Error?e.message:"账号加载失败")})},0);return()=>{active=false;window.clearTimeout(timer)}},[]);
   async function create(event:React.FormEvent){event.preventDefault();setBusy(true);setNotice("");try{await request("/admin/users",{method:"POST",body:JSON.stringify(form)});setForm({display_name:"",email:"",password:"",role:"member"});setNotice("账号创建成功");await load()}catch(e){setNotice(e instanceof Error?e.message:"账号创建失败")}finally{setBusy(false)}}
-  return <div className="admin-grid"><form className="panel admin-form" onSubmit={create}><h2>创建使用账号</h2><p>同一组织内用户可以协作查看门店分析任务。</p>{notice&&<div className="job-notice">{notice}</div>}<label>姓名<input value={form.display_name} onChange={e=>setForm({...form,display_name:e.target.value})} required/></label><label>邮箱<input type="email" value={form.email} onChange={e=>setForm({...form,email:e.target.value})} required/></label><label>初始密码<input type="password" minLength={10} value={form.password} onChange={e=>setForm({...form,password:e.target.value})} required/><small>至少 10 位，建议用户首次登录后更换</small></label><label>权限<select value={form.role} onChange={e=>setForm({...form,role:e.target.value})}><option value="member">普通成员</option><option value="admin">管理员</option></select></label><button className="primary" disabled={busy}>{busy?"正在创建…":"创建账号"}</button></form><section className="panel"><div className="panel-head"><div><h2>组织账号</h2><p>共 {users.length} 个账号</p></div></div><div className="table-wrap"><table><thead><tr><th>姓名</th><th>邮箱</th><th>角色</th><th>状态</th><th>创建时间</th></tr></thead><tbody>{users.map(user=><tr key={user.id}><td>{user.display_name}</td><td>{user.email}</td><td>{user.role==="admin"?"管理员":"成员"}</td><td>{user.active?"启用":"停用"}</td><td>{new Date(user.created_at).toLocaleDateString("zh-CN")}</td></tr>)}</tbody></table></div></section></div>
+  return <div className="admin-grid"><form className="panel admin-form" onSubmit={create}><h2>创建使用账号</h2><p>每个账号只能查看、分析和导出自己创建的任务。</p>{notice&&<div className="job-notice">{notice}</div>}<label>姓名<input value={form.display_name} onChange={e=>setForm({...form,display_name:e.target.value})} required/></label><label>邮箱<input type="email" value={form.email} onChange={e=>setForm({...form,email:e.target.value})} required/></label><label>初始密码<input type="password" minLength={10} value={form.password} onChange={e=>setForm({...form,password:e.target.value})} required/><small>至少 10 位，建议用户首次登录后更换</small></label><label>权限<select value={form.role} onChange={e=>setForm({...form,role:e.target.value})}><option value="member">普通成员</option><option value="admin">管理员</option></select></label><button className="primary" disabled={busy}>{busy?"正在创建…":"创建账号"}</button></form><section className="panel"><div className="panel-head"><div><h2>组织账号</h2><p>共 {users.length} 个账号</p></div></div><div className="table-wrap"><table><thead><tr><th>姓名</th><th>邮箱</th><th>角色</th><th>状态</th><th>创建时间</th></tr></thead><tbody>{users.map(user=><tr key={user.id}><td>{user.display_name}</td><td>{user.email}</td><td>{user.role==="admin"?"管理员":"成员"}</td><td>{user.active?"启用":"停用"}</td><td>{new Date(user.created_at).toLocaleDateString("zh-CN")}</td></tr>)}</tbody></table></div></section></div>
 }
 
 function AccountSecurity({onChanged}:{onChanged:()=>void}){
