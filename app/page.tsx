@@ -383,7 +383,7 @@ export default function Page() {
 
 function BatchExport({api}:{api:string}){
   const [options,setOptions]=useState<ExportOptions|null>(null),[jobIds,setJobIds]=useState<number[]>([]),[stores,setStores]=useState<ExportStoreItem[]>([]),[storeIds,setStoreIds]=useState<number[]>([]);
-  const [fields,setFields]=useState<string[]>(["city","district","status","poi_total","business_district_type","main_audience","age_ranges","consumption_level","consumption_index","analysis_confidence"]),[selectedRadii,setSelectedRadii]=useState<number[]>([]),[selectedCategories,setSelectedCategories]=useState<string[]>([]);
+  const [fields,setFields]=useState<string[]>(["city","district","poi_total","main_audience","age_ranges"]),[selectedRadii,setSelectedRadii]=useState<number[]>([]),[selectedCategories,setSelectedCategories]=useState<string[]>([]);
   const [sheets,setSheets]=useState({poi_details:false,failures:true,notes:true}),[filter,setFilter]=useState(""),[busy,setBusy]=useState(false),[progress,setProgress]=useState(""),[notice,setNotice]=useState("");
   useEffect(()=>{let active=true;void request<ExportOptions>("/batch-export/options").then(data=>{if(!active)return;setOptions(data);const first=data.jobs.find(job=>job.total_stores>0);if(first){setJobIds([first.id]);setSelectedRadii(first.config?.radii||[]);setSelectedCategories(first.config?.categories||[]);setProgress("正在读取所选任务的门店…")}}).catch(error=>{if(active)setNotice(error instanceof Error?error.message:"导出配置加载失败")});return()=>{active=false}},[]);
   const selectedJobs=useMemo(()=>options?.jobs.filter(job=>jobIds.includes(job.id))||[],[options,jobIds]);
