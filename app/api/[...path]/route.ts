@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { getRequestExecutionContext } from "vinext/shims/request-context";
 import * as XLSX from "xlsx";
 import { callDeepSeek, type AggregateStore } from "../deepseek";
+import { searchStoreCandidates, type StoreCandidate } from "../../../server/store-search.js";
 
 export const runtime = "edge";
 
@@ -9,7 +10,7 @@ type Row = Record<string, unknown>;
 type D1Statement = { bind: (...values: unknown[]) => D1Statement; run: () => Promise<{meta?:{last_row_id?:number}}> ; first: <T=Row>() => Promise<T|null>; all: <T=Row>() => Promise<{results:T[]}> };
 type D1 = { prepare: (sql:string) => D1Statement; batch: (statements:D1Statement[]) => Promise<unknown> };
 type RuntimeEnv = { DB:D1; AMAP_WEB_SERVICE_KEY?:string; AMAP_REQUEST_INTERVAL_MS?:string; DEEPSEEK_API_KEY?:string; DEEPSEEK_API_BASE_URL?:string; DEEPSEEK_MODEL?:string };
-type Candidate = {id:string;name:string;address:string;province:string;city:string;district:string;location:[number,number];type:string;typecode:string;score:number;status:string;reasons:string[]};
+type Candidate = StoreCandidate;
 type Poi = {id:string;name:string;category:string;type:string;typecode:string;address:string;distance:number;location:[number,number];distance_bucket:string};
 
 const runtimeEnv = env as unknown as RuntimeEnv;
@@ -65,18 +66,8 @@ async function amap(path:string,params:Record<string,string|number|boolean>){
 }
 
 function parseLocation(value:unknown):[number,number]|null{const parts=clean(value).split(",").map(Number);return parts.length>=2&&parts.every(Number.isFinite)?[parts[0],parts[1]]:null}
-function candidateFromPoi(raw:Row,input:string,city:string,district:string):Candidate|null{
-  const location=parseLocation(raw.location);if(!location)return null;
-  const name=clean(raw.name),address=clean(raw.address),poiCity=clean(raw.cityname||raw.city),poiDistrict=clean(raw.adname||raw.district);
-  const a=normalize(input),b=normalize(name);let score=a===b?92:(a.includes(b)||b.includes(a)?78:48);
-  if(city&&poiCity.includes(city.replace(/市$/,"") ))score+=5;if(district&&poiDistrict.includes(district.replace(/[区县]$/,"") ))score+=5;
-  score=Math.min(100,score);
-  return {id:clean(raw.id),name,address,province:clean(raw.pname||raw.province),city:poiCity,district:poiDistrict,location,type:clean(raw.type),typecode:clean(raw.typecode),score,status:score>=75?"高置信度":score>=55?"中置信度":"低置信度",reasons:[score>=75?"门店名称与行政区信息较一致":"系统按名称与地址综合排序"]};
-}
 async function searchCandidates(input:string,city="",district="",address=""){
-  const data=await amap("/v5/place/text",{keywords:input,region:city||district,city_limit:Boolean(city||district),show_fields:"business,navi",page_size:20,page_num:1});
-  const rows=Array.isArray(data.pois)?data.pois as Row[]:[];
-  return rows.map(row=>candidateFromPoi(row,input,city,district)).filter((item):item is Candidate=>Boolean(item)).sort((a,b)=>b.score-a.score).map(item=>({...item,reasons:address?[...item.reasons,"已参考用户填写的详细地址"]:item.reasons}));
+  return searchStoreCandidates(amap,input,city,district,address);
 }
 
 async function geocode(body:Row){
@@ -116,7 +107,7 @@ async function runMatching(jobId:number){
   for(const store of results){
     const job=await runtimeEnv.DB.prepare("SELECT control FROM jobs WHERE id=?").bind(jobId).first<Row>();if(job?.control!=="run")break;
     await runtimeEnv.DB.prepare("UPDATE jobs SET current_store=?,updated_at=? WHERE id=?").bind(store.input_name,now(),jobId).run();
-    try{const candidates=await searchCandidates(clean(store.input_name),clean(store.city),clean(store.district),clean(store.address));const top=candidates[0];if(!top)throw new Error("高德未返回有效候选");
+    try{const candidates=await searchCandidates(clean(store.input_name),clean(store.city),clean(store.district),clean(store.address));const top=candidates.find(candidate=>candidate.auto_confirm);if(!top)throw new Error(candidates.length?"候选门店置信度不足，需要人工确认":"高德未返回有效候选");
       await runtimeEnv.DB.prepare("UPDATE stores SET standard_name=?,amap_poi_id=?,longitude=?,latitude=?,province=?,city=?,district=?,address=?,match_score=?,match_status=?,status='已确认',error_message=NULL,updated_at=? WHERE id=?").bind(top.name,top.id,top.location[0],top.location[1],top.province||store.province,top.city||store.city,top.district||store.district,top.address||store.address,top.score,top.status,now(),store.id).run();
     }catch(error){await runtimeEnv.DB.prepare("UPDATE stores SET status='匹配失败',error_message=?,updated_at=? WHERE id=?").bind(error instanceof Error?error.message:"匹配失败",now(),store.id).run()}
     await refreshJob(jobId,"match");

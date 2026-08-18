@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { callDeepSeek, type AggregateStore } from "../app/api/deepseek.js";
+import { searchStoreCandidates } from "./store-search.js";
 import { query } from "./db.js";
 
 export type Row=Record<string,any>;
@@ -7,7 +8,6 @@ export type Poi={id:string;name:string;category:string;type:string;typecode:stri
 export const POI_CATEGORY_TYPES:Record<string,string>={"住宅小区":"120302","幼儿园":"141204","小学":"141203","中学":"141202","购物中心":"060101","超市":"060400","便利店":"060200","医院":"090100","药店":"090601","公园":"110101","地铁站":"150500","公交站":"150700"};
 let lastAmap=0;
 export const clean=(value:unknown)=>String(value??"").trim();
-const normalize=(value:string)=>value.toLowerCase().replace(/[\s（）()·\-_]/g,"").replace(/分店|门店|店$/g,"");
 const parseLocation=(value:unknown):[number,number]|null=>{const parts=clean(value).split(",").map(Number);return parts.length>=2&&parts.every(Number.isFinite)?[parts[0],parts[1]]:null};
 const haversine=(a:[number,number],b:[number,number])=>{const r=6371000,toRad=(n:number)=>n*Math.PI/180,dLat=toRad(b[1]-a[1]),dLng=toRad(b[0]-a[0]),x=Math.sin(dLat/2)**2+Math.cos(toRad(a[1]))*Math.cos(toRad(b[1]))*Math.sin(dLng/2)**2;return Math.round(2*r*Math.asin(Math.sqrt(x)))};
 const distanceBucket=(distance:number,radii:number[])=>{const sorted=[...radii].sort((a,b)=>a-b),hit=sorted.find(radius=>distance<=radius);return hit?`≤${hit}米`:`>${sorted.at(-1)||500}米`};
@@ -18,8 +18,7 @@ async function amap(path:string,params:Record<string,unknown>){
 }
 
 export async function searchCandidates(input:string,city="",district="",address=""){
-  const data=await amap("/v5/place/text",{keywords:input,region:city||district,city_limit:Boolean(city||district),show_fields:"business,navi",page_size:20,page_num:1}),rows=Array.isArray(data.pois)?data.pois as Row[]:[];
-  return rows.map(raw=>{const location=parseLocation(raw.location);if(!location)return null;const name=clean(raw.name),poiCity=clean(raw.cityname||raw.city),poiDistrict=clean(raw.adname||raw.district),a=normalize(input),b=normalize(name);let score=a===b?92:(a.includes(b)||b.includes(a)?78:48);if(city&&poiCity.includes(city.replace(/市$/,"") ))score+=5;if(district&&poiDistrict.includes(district.replace(/[区县]$/,"") ))score+=5;score=Math.min(100,score);return {id:clean(raw.id),name,address:clean(raw.address),province:clean(raw.pname||raw.province),city:poiCity,district:poiDistrict,location,type:clean(raw.type),typecode:clean(raw.typecode),score,status:score>=75?"高置信度":score>=55?"中置信度":"低置信度",reasons:[score>=75?"门店名称与行政区信息较一致":"系统按名称与地址综合排序",...(address?["已参考用户填写的详细地址"]:[])]}}).filter(Boolean).sort((a:any,b:any)=>b.score-a.score);
+  return searchStoreCandidates(amap,input,city,district,address);
 }
 
 export async function geocode(body:Row){const address=[body.province,body.city,body.district,body.address||body.name].map(clean).join(""),data=await amap("/v3/geocode/geo",{address,city:clean(body.city)}),rows=Array.isArray(data.geocodes)?data.geocodes as Row[]:[];return rows.map((item,index)=>{const location=parseLocation(item.location);return location?{id:`geo-${index}`,name:clean(body.name)||clean(item.formatted_address),formatted_address:clean(item.formatted_address),address:clean(item.formatted_address),province:clean(item.province),city:clean(item.city)||clean(body.city),district:clean(item.district),adcode:clean(item.adcode),location,type:"地址定位",typecode:"",score:70,status:"地址候选",reasons:["根据详细地址完成地理编码"],source:"amap_geocode"}:null}).filter(Boolean)};

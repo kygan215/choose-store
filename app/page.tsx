@@ -147,6 +147,7 @@ export default function Page() {
       } else {
         const data = await request<{ candidates: Candidate[] }>("/stores/search", { method: "POST", body: JSON.stringify(query) });
         setCandidates(data.candidates);
+        if(!data.candidates.length)setError("未找到候选门店；系统已尝试标准化名称、关键词变体和地标周边回退搜索");
       }
     } catch (e) { setError(e instanceof Error ? e.message : "搜索失败"); } finally { setBusy(""); }
   }
