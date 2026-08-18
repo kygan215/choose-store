@@ -14,7 +14,7 @@ type Poi = {id:string;name:string;category:string;type:string;typecode:string;ad
 
 const runtimeEnv = env as unknown as RuntimeEnv;
 const CATEGORY_TYPES:Record<string,string> = {
-  "住宅小区":"120302","幼儿园":"141204","小学":"141203","购物中心":"060101","超市":"060400",
+  "住宅小区":"120302","幼儿园":"141204","小学":"141203","中学":"141202","购物中心":"060101","超市":"060400",
   "便利店":"060200","医院":"090100","药店":"090601","公园":"110101","地铁站":"150500","公交站":"150700",
 };
 const FIELD_ALIASES:Record<string,string[]> = {

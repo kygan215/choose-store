@@ -6,7 +6,8 @@ export const EXPORT_BASE_FIELDS = [
   {id:"longitude",label:"经度",group:"定位信息"},{id:"latitude",label:"纬度",group:"定位信息"},{id:"amap_poi_id",label:"高德 POI ID",group:"定位信息"},
   {id:"user_code",label:"门店编号",group:"门店信息"},{id:"brand",label:"品牌",group:"门店信息"},{id:"status",label:"分析状态",group:"分析信息"},
   {id:"match_score",label:"门店匹配分",group:"分析信息"},{id:"poi_total",label:"POI 总数量",group:"分析信息"},{id:"analysis_time",label:"分析完成时间",group:"分析信息"},
-  {id:"business_district_type",label:"商圈类型",group:"商圈画像"},{id:"business_area",label:"商圈名称",group:"商圈画像"},{id:"business_level",label:"商圈能级",group:"商圈画像"},
+  {id:"business_district_type",label:"商圈类型",group:"商圈画像"},{id:"business_area",label:"识别区域",group:"商圈画像"},{id:"business_level",label:"商圈能级",group:"商圈画像"},
+  {id:"business_district_recognition",label:"各半径商圈识别",group:"商圈画像"},{id:"business_district_score",label:"主半径商圈得分",group:"商圈画像"},{id:"business_district_confidence",label:"商圈识别置信度",group:"商圈画像"},{id:"business_district_evidence",label:"商圈识别依据",group:"商圈画像"},
   {id:"main_audience",label:"主要潜在人群",group:"潜在人群"},{id:"secondary_audience",label:"次要潜在人群",group:"潜在人群"},{id:"age_ranges",label:"主要年龄段",group:"潜在人群"},
   {id:"consumption_level",label:"消费能力判断",group:"潜在人群"},{id:"consumption_index",label:"消费环境指数",group:"潜在人群"},{id:"mall_profile",label:"商场环境判断",group:"潜在人群"},
   {id:"analysis_confidence",label:"分析可信度",group:"可信度与依据"},{id:"analysis_evidence",label:"分析依据",group:"可信度与依据"},{id:"analysis_limitations",label:"数据限制",group:"可信度与依据"},
@@ -30,13 +31,18 @@ function text(value:unknown){return sanitizeExcelText(value)}
 function join(values:unknown,separator="、"){return Array.isArray(values)?values.map(value=>typeof value==="object"&&value?String((value as Row).label||(value as Row).age_range||""):String(value??"")).filter(Boolean).join(separator):""}
 function storeName(row:Row){return text(row.standard_name||row.input_name||"")}
 function storeAddress(row:Row){return text(row.address||"")}
+function recognitionValues(analysis:Row){
+  const recognition=(analysis.business_district_recognition||{}) as Row,byRadius=(recognition.by_radius||{}) as Record<string,Row>,primary=byRadius[String(recognition.primary_radius)]||{},all=Object.values(byRadius).sort((a,b)=>Number(a.radius)-Number(b.radius));
+  return {summary:all.map(item=>`${radiusLabel(Number(item.radius))}：${item.is_business_district==null?"暂无法判断":item.is_business_district?"是":"否"}（${item.strength||item.status||""}）`).join("；"),score:primary.score==null?"":Number(primary.score),confidence:primary.confidence||"",evidence:join(primary.evidence,"；")};
+}
 
 function optionalValue(id:string,row:Row,ai:Row){
-  const analysis=(row.analysis_json||{}) as Row,audience=(analysis.audience_profile||{}) as Row,groups=Array.isArray(audience.primary_groups)?audience.primary_groups as Row[]:[],aiResult=(ai.result_json||{}) as Row;
+  const analysis=(row.analysis_json||{}) as Row,audience=(analysis.audience_profile||{}) as Row,groups=Array.isArray(audience.primary_groups)?audience.primary_groups as Row[]:[],aiResult=(ai.result_json||{}) as Row,recognition=recognitionValues(analysis);
   const values:Record<string,unknown>={
     province:row.province,city:row.city,district:row.district,longitude:row.longitude==null?"":Number(row.longitude),latitude:row.latitude==null?"":Number(row.latitude),amap_poi_id:row.amap_poi_id,
     user_code:row.user_code,brand:row.brand,status:row.status,match_score:row.match_score==null?"":Number(row.match_score),poi_total:Array.isArray(row.pois_json)?row.pois_json.length:0,
     analysis_time:row.updated_at?new Date(row.updated_at):"",business_district_type:analysis.business_district_type?.type,business_area:analysis.business_area?.name,business_level:analysis.level?.level,
+    business_district_recognition:recognition.summary,business_district_score:recognition.score,business_district_confidence:recognition.confidence,business_district_evidence:recognition.evidence,
     main_audience:groups[0]?.label,secondary_audience:groups[1]?.label,age_ranges:groups.map(group=>group.age_range).filter(Boolean).join("、"),consumption_level:audience.consumption_power?.level,
     consumption_index:audience.consumption_power?.index==null?"":Number(audience.consumption_power.index),mall_profile:audience.mall_profile?.level,analysis_confidence:analysis.confidence_level||audience.confidence,
     analysis_evidence:join(audience.evidence,"；"),analysis_limitations:join(audience.limitations,"；"),ai_summary:aiResult.summary,ai_audience:join(aiResult.primary_users),

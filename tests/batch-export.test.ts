@@ -9,6 +9,7 @@ const pois:Poi[]=[
   {id:"1",name:"小区A",category:"住宅小区",type:"",typecode:"",address:"",distance:320,location:[114.3,30.5],distance_bucket:"≤500米"},
   {id:"2",name:"小区B",category:"住宅小区",type:"",typecode:"",address:"",distance:720,location:[114.31,30.51],distance_bucket:"≤800米"},
   {id:"3",name:"小学A",category:"小学",type:"",typecode:"",address:"",distance:480,location:[114.32,30.52],distance_bucket:"≤500米"},
+  {id:"4",name:"中学A",category:"中学",type:"科教文化服务;学校;中学",typecode:"141202",address:"",distance:450,location:[114.32,30.52],distance_bucket:"≤500米"},
 ];
 
 test("圈层分类字段名称和累计数量口径正确",()=>{
@@ -16,6 +17,8 @@ test("圈层分类字段名称和累计数量口径正确",()=>{
   assert.equal(poiColumnLabel(1000,"小学"),"1公里小学数量");
   assert.equal(countPois(pois,500,"住宅小区"),1);
   assert.equal(countPois(pois,800,"住宅小区"),2);
+  assert.equal(poiColumnLabel(500,"中学"),"500米中学数量");
+  assert.equal(countPois(pois,500,"中学"),1);
 });
 
 test("Excel 文本会阻止公式注入",()=>{
