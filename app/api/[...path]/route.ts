@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { getRequestExecutionContext } from "vinext/shims/request-context";
 import * as XLSX from "xlsx";
+import bcrypt from "bcryptjs";
 import { callDeepSeek, type AggregateStore } from "../deepseek";
 import { searchStoreCandidates, type StoreCandidate } from "../../../server/store-search.js";
 
@@ -9,9 +10,10 @@ export const runtime = "edge";
 type Row = Record<string, unknown>;
 type D1Statement = { bind: (...values: unknown[]) => D1Statement; run: () => Promise<{meta?:{last_row_id?:number}}> ; first: <T=Row>() => Promise<T|null>; all: <T=Row>() => Promise<{results:T[]}> };
 type D1 = { prepare: (sql:string) => D1Statement; batch: (statements:D1Statement[]) => Promise<unknown> };
-type RuntimeEnv = { DB:D1; AMAP_WEB_SERVICE_KEY?:string; AMAP_REQUEST_INTERVAL_MS?:string; DEEPSEEK_API_KEY?:string; DEEPSEEK_API_BASE_URL?:string; DEEPSEEK_MODEL?:string };
+type RuntimeEnv = { DB:D1; AMAP_WEB_SERVICE_KEY?:string; AMAP_REQUEST_INTERVAL_MS?:string; DEEPSEEK_API_KEY?:string; DEEPSEEK_API_BASE_URL?:string; DEEPSEEK_MODEL?:string; ADMIN_EMAIL?:string; ADMIN_PASSWORD?:string; ADMIN_NAME?:string; SESSION_HOURS?:string };
 type Candidate = StoreCandidate;
 type Poi = {id:string;name:string;category:string;type:string;typecode:string;address:string;distance:number;location:[number,number];distance_bucket:string};
+type CloudUser = {id:number;email:string;display_name:string;role:"admin"|"member"};
 
 const runtimeEnv = env as unknown as RuntimeEnv;
 const CATEGORY_TYPES:Record<string,string> = {
@@ -25,8 +27,8 @@ const FIELD_ALIASES:Record<string,string[]> = {
 let lastAmapRequestAt = 0;
 let limiter = Promise.resolve();
 
-function json(data:unknown,status=200,message="操作成功") { return Response.json({success:status<400,data:status<400?data:null,message,...(status>=400?{error:data}:{})},{status}); }
-function fail(message:string,status=400,code="REQUEST_ERROR") { return Response.json({success:false,data:null,message,error:{code,message}},{status}); }
+function json(data:unknown,status=200,message="操作成功",headers?:HeadersInit) { return Response.json({success:status<400,data:status<400?data:null,message,...(status>=400?{error:data}:{})},{status,headers}); }
+function fail(message:string,status=400,code="REQUEST_ERROR",headers?:HeadersInit) { return Response.json({success:false,data:null,message,error:{code,message}},{status,headers}); }
 function now(){return new Date().toISOString()}
 function parseJson<T>(value:unknown,fallback:T):T { try{return value?JSON.parse(String(value)) as T:fallback}catch{return fallback} }
 function clean(value:unknown){return String(value??"").trim()}
@@ -36,6 +38,10 @@ function haversine(a:[number,number],b:[number,number]){const r=6371000,toRad=(n
 
 async function ensureDb(){
   await runtimeEnv.DB.batch([
+    runtimeEnv.DB.prepare(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL UNIQUE COLLATE NOCASE, display_name TEXT NOT NULL, password_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'member', active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`),
+    runtimeEnv.DB.prepare(`CREATE TABLE IF NOT EXISTS sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, token_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL, created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL)`),
+    runtimeEnv.DB.prepare("CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token_hash)"),
+    runtimeEnv.DB.prepare("CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)"),
     runtimeEnv.DB.prepare(`CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, filename TEXT, status TEXT NOT NULL DEFAULT '等待开始匹配', total_stores INTEGER NOT NULL DEFAULT 0, processed_stores INTEGER NOT NULL DEFAULT 0, matched_stores INTEGER NOT NULL DEFAULT 0, success_stores INTEGER NOT NULL DEFAULT 0, failed_stores INTEGER NOT NULL DEFAULT 0, config_json TEXT NOT NULL DEFAULT '{}', stage TEXT NOT NULL DEFAULT 'match', control TEXT NOT NULL DEFAULT 'idle', current_store TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`),
     runtimeEnv.DB.prepare(`CREATE TABLE IF NOT EXISTS stores (id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER REFERENCES jobs(id) ON DELETE CASCADE, input_name TEXT NOT NULL, standard_name TEXT, amap_poi_id TEXT, longitude REAL, latitude REAL, province TEXT DEFAULT '', city TEXT DEFAULT '', district TEXT DEFAULT '', address TEXT DEFAULT '', user_code TEXT, brand TEXT, match_score REAL, match_status TEXT DEFAULT '', status TEXT NOT NULL DEFAULT '等待匹配', error_message TEXT, pois_json TEXT NOT NULL DEFAULT '[]', analysis_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`),
     runtimeEnv.DB.prepare("CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at)"),
@@ -45,6 +51,42 @@ async function ensureDb(){
     runtimeEnv.DB.prepare("CREATE INDEX IF NOT EXISTS idx_ai_analyses_store_created ON ai_analyses(store_id,created_at)"),
     runtimeEnv.DB.prepare("CREATE INDEX IF NOT EXISTS idx_ai_analyses_job_scope_created ON ai_analyses(job_id,scope,created_at)"),
   ]);
+}
+
+
+const SESSION_COOKIE="storemap_session";
+const sessionHours=()=>Math.max(1,Math.min(168,Number(runtimeEnv.SESSION_HOURS||12)));
+async function sha256(value:string){const bytes=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(value));return [...new Uint8Array(bytes)].map(byte=>byte.toString(16).padStart(2,"0")).join("")}
+function randomToken(){const bytes=crypto.getRandomValues(new Uint8Array(32));return btoa(String.fromCharCode(...bytes)).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/g,"")}
+function cookieValue(request:Request,name:string){const raw=request.headers.get("cookie")||"";for(const item of raw.split(";")){const [key,...parts]=item.trim().split("=");if(key===name)return decodeURIComponent(parts.join("="))}return ""}
+function sessionCookie(token:string,maxAge:number){return `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}`}
+function clearSessionCookie(){return `${SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`}
+function publicUser(user:CloudUser){return {id:Number(user.id),tenantId:1,email:user.email,displayName:user.display_name,display_name:user.display_name,role:user.role}}
+
+async function ensureAdmin(){
+  const email=clean(runtimeEnv.ADMIN_EMAIL).toLowerCase(),password=String(runtimeEnv.ADMIN_PASSWORD||""),displayName=clean(runtimeEnv.ADMIN_NAME)||"系统管理员";
+  if(!email||password.length<10)throw new Error("线上管理员账号尚未配置");
+  const existing=await runtimeEnv.DB.prepare("SELECT id FROM users WHERE lower(email)=lower(?) LIMIT 1").bind(email).first<Row>();if(existing)return;
+  const stamp=now(),passwordHash=await bcrypt.hash(password,10);await runtimeEnv.DB.prepare("INSERT INTO users(email,display_name,password_hash,role,active,created_at,updated_at) VALUES(?,?,?,'admin',1,?,?)").bind(email,displayName,passwordHash,stamp,stamp).run();
+}
+
+async function currentUser(request:Request):Promise<CloudUser|null>{
+  const token=cookieValue(request,SESSION_COOKIE);if(!token)return null;const tokenHash=await sha256(token),user=await runtimeEnv.DB.prepare("SELECT u.id,u.email,u.display_name,u.role FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>? AND u.active=1 LIMIT 1").bind(tokenHash,now()).first<CloudUser>();if(!user)return null;
+  await runtimeEnv.DB.prepare("UPDATE sessions SET last_seen_at=? WHERE token_hash=?").bind(now(),tokenHash).run();return user;
+}
+
+async function login(request:Request){
+  await ensureAdmin();const body=await bodyJson(request),email=clean(body.email).toLowerCase(),password=String(body.password||""),user=await runtimeEnv.DB.prepare("SELECT id,email,display_name,password_hash,role,active FROM users WHERE lower(email)=lower(?) LIMIT 1").bind(email).first<Row>();
+  if(!user||!user.active||!await bcrypt.compare(password,String(user.password_hash||"")))return fail("邮箱或密码错误",401,"AUTH_INVALID");
+  const token=randomToken(),tokenHash=await sha256(token),stamp=now(),maxAge=sessionHours()*3600,expires=new Date(Date.now()+maxAge*1000).toISOString();await runtimeEnv.DB.prepare("DELETE FROM sessions WHERE expires_at<=?").bind(stamp).run();await runtimeEnv.DB.prepare("INSERT INTO sessions(user_id,token_hash,expires_at,created_at,last_seen_at) VALUES(?,?,?,?,?)").bind(user.id,tokenHash,expires,stamp,stamp).run();
+  return json(publicUser(user as unknown as CloudUser),200,"登录成功",{"Set-Cookie":sessionCookie(token,maxAge)});
+}
+
+async function logout(request:Request){const token=cookieValue(request,SESSION_COOKIE);if(token)await runtimeEnv.DB.prepare("DELETE FROM sessions WHERE token_hash=?").bind(await sha256(token)).run();return json({},200,"已退出登录",{"Set-Cookie":clearSessionCookie()})}
+
+async function changePassword(request:Request,user:CloudUser){
+  const body=await bodyJson(request),current=String(body.current_password||""),next=String(body.new_password||"");if(next.length<12)return fail("新密码至少 12 位");const saved=await runtimeEnv.DB.prepare("SELECT password_hash FROM users WHERE id=?").bind(user.id).first<Row>();if(!saved||!await bcrypt.compare(current,String(saved.password_hash||"")))return fail("当前密码错误",401);
+  const passwordHash=await bcrypt.hash(next,10);await runtimeEnv.DB.prepare("UPDATE users SET password_hash=?,updated_at=? WHERE id=?").bind(passwordHash,now(),user.id).run();await runtimeEnv.DB.prepare("DELETE FROM sessions WHERE user_id=?").bind(user.id).run();return json({},200,"密码已修改，请重新登录",{"Set-Cookie":clearSessionCookie()});
 }
 
 async function amap(path:string,params:Record<string,string|number|boolean>){
@@ -159,6 +201,15 @@ async function generateAi(scope:"single"|"comparison",stores:AggregateStore[],jo
 async function handle(request:Request,path:string[]){
   await ensureDb();const method=request.method,id=Number(path[1]);
   if(path[0]==="health"&&method==="GET")return json({mock:false,web_key:Boolean(runtimeEnv.AMAP_WEB_SERVICE_KEY),js_key:true,coordinate_system:"GCJ-02",runtime:"cloud"});
+
+  if(path[0]==="auth"&&path[1]==="login"&&method==="POST")return login(request);
+  if(path[0]==="auth"&&path[1]==="logout"&&method==="POST")return logout(request);
+  const user=await currentUser(request);
+  if(path[0]==="auth"&&path[1]==="me"&&method==="GET")return user?json(publicUser(user)):fail("请先登录",401,"AUTH_REQUIRED");
+  if(!user)return fail("请先登录",401,"AUTH_REQUIRED");
+  if(path[0]==="auth"&&path[1]==="change-password"&&method==="POST")return changePassword(request,user);
+  if(path[0]==="admin"&&path[1]==="users"&&method==="GET"){if(user.role!=="admin")return fail("需要管理员权限",403);const {results}=await runtimeEnv.DB.prepare("SELECT id,email,display_name,role,active,created_at FROM users ORDER BY id").all<Row>();return json(results)}
+  if(path[0]==="admin"&&path[1]==="users"&&method==="POST"){if(user.role!=="admin")return fail("需要管理员权限",403);const body=await bodyJson(request),email=clean(body.email).toLowerCase(),displayName=clean(body.display_name),password=String(body.password||""),role=body.role==="admin"?"admin":"member";if(!email||!displayName||password.length<10)return fail("姓名、邮箱必填，密码至少 10 位");const existing=await runtimeEnv.DB.prepare("SELECT id FROM users WHERE lower(email)=lower(?) LIMIT 1").bind(email).first<Row>();if(existing)return fail("邮箱已存在",409);const stamp=now(),passwordHash=await bcrypt.hash(password,10),saved=await runtimeEnv.DB.prepare("INSERT INTO users(email,display_name,password_hash,role,active,created_at,updated_at) VALUES(?,?,?,?,1,?,?)").bind(email,displayName,passwordHash,role,stamp,stamp).run();return json({id:Number(saved.meta?.last_row_id),email,display_name:displayName,role,active:true,created_at:stamp},201,"用户已创建")}
   if(path[0]==="poi-categories"&&method==="GET")return json(Object.keys(CATEGORY_TYPES).concat("竞品门店").map((name,index)=>({id:index+1,name,display_name:name,search_mode:"typecode",typecodes:CATEGORY_TYPES[name]||"",keywords:"",color:"#08745b"})));
   if(path[0]==="geocode"&&method==="POST")return json({candidates:await geocode(await bodyJson(request))});
   if(path[0]==="stores"&&path[1]==="search"&&method==="POST"){const body=await bodyJson(request);return json({candidates:await searchCandidates(clean(body.name),clean(body.city),clean(body.district),clean(body.address))})}
