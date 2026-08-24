@@ -37,7 +37,8 @@
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "tsx": "^4.23.12",
-    "vinext": "0.0.45"
+    "vinext": "0.0.45",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.37.1",
@@ -59,8 +60,7 @@
     "tailwindcss": "4.2.1",
     "typescript": "5.9.3",
     "vite": "8.2.1",
-    "wrangler": "4.92.0",
-    "xlsx": "^0.18.5"
+    "wrangler": "4.92.0"
   },
   "overrides": {
     "brace-expansion": "1.1.18",
