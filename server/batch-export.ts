@@ -29,7 +29,7 @@ export function countPois(pois:Poi[],radius:number,category:string){return pois.
 
 function text(value:unknown){return sanitizeExcelText(value)}
 function join(values:unknown,separator="、"){return Array.isArray(values)?values.map(value=>typeof value==="object"&&value?String((value as Row).label||(value as Row).age_range||""):String(value??"")).filter(Boolean).join(separator):""}
-function storeName(row:Row){return text(row.standard_name||row.input_name||"")}
+function storeName(row:Row){return text(row.input_name||row.standard_name||"")}
 function storeAddress(row:Row){return text(row.address||"")}
 function recognitionValues(analysis:Row){
   const recognition=(analysis.business_district_recognition||{}) as Row,byRadius=(recognition.by_radius||{}) as Record<string,Row>,primary=byRadius[String(recognition.primary_radius)]||{},all=Object.values(byRadius).sort((a,b)=>Number(a.radius)-Number(b.radius));

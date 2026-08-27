@@ -50,3 +50,35 @@ test("名称变体仍无门店时使用地标周边品牌回退",async()=>{
   assert.equal(candidates[0]?.auto_confirm,true);
   assert.ok(calls.some(call=>call.startsWith("/v5/place/around|零食很忙")));
 });
+
+test("好想来品牌变体和道路同义词可以形成高置信度匹配",()=>{
+  const plan=buildStoreSearchPlan("好想来零食盐城响水县黄海路店");
+  const candidate=scoreStoreCandidate({
+    id:"YC001",name:"好想来零食乐园(盐城响水县陈家港镇店)",
+    address:"陈家港镇黄海大街46号",cityname:"盐城市",adname:"响水县",
+    location:"119.81429,34.37576",type:"购物服务",typecode:"060200",
+  },plan);
+  assert.equal(plan.brand,"好想来零食");
+  assert.ok(candidate);
+  assert.equal(candidate.auto_confirm,true);
+  assert.ok(candidate.score>=75);
+  assert.match(candidate.reasons.join("；"),/黄海|道路|地理/);
+});
+
+test("乡镇名称一致时优先于仅品牌和区县相同的候选",()=>{
+  const plan=buildStoreSearchPlan("好想来零食南通海安市雅周镇店");
+  const exactTown=scoreStoreCandidate({
+    id:"NT001",name:"好想来零食乐园(人民路店)",
+    address:"雅周镇周村一组好想来品牌零食",cityname:"南通市",adname:"海安市",
+    location:"120.332715,32.39518",type:"购物服务",typecode:"060200",
+  },plan);
+  const otherTown=scoreStoreCandidate({
+    id:"NT002",name:"好想来零食乐园(曲塘店)",
+    address:"曲塘镇中心街",cityname:"南通市",adname:"海安市",
+    location:"120.400000,32.500000",type:"购物服务",typecode:"060200",
+  },plan);
+  assert.ok(exactTown&&otherTown);
+  assert.equal(exactTown.auto_confirm,true);
+  assert.ok(exactTown.score>otherTown.score);
+  assert.match(exactTown.reasons.join("；"),/雅周镇|地理/);
+});

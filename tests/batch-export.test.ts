@@ -27,11 +27,11 @@ test("Excel 文本会阻止公式注入",()=>{
 });
 
 test("工作簿固定包含门店名称地址，并对未分析圈层留空",async()=>{
-  const row:Row={id:1,input_name:"=测试门店",standard_name:"",address:"测试路1号",status:"分析完成",pois_json:pois,analysis_json:null,updated_at:new Date(),job_config:{radii:[500],categories:["住宅小区","小学"]}};
+  const row:Row={id:1,input_name:"=用户原表门店",standard_name:"高德标准门店",address:"测试路1号",status:"分析完成",pois_json:pois,analysis_json:null,updated_at:new Date(),job_config:{radii:[500],categories:["住宅小区","小学"]}};
   const buffer=await buildBatchExportWorkbook([row],[],{jobIds:[1],storeIds:[1],fields:[],radii:[500,800],categories:["住宅小区"],includePoiDetails:false,includeFailures:false,includeNotes:true},{userEmail:"tester@example.com",jobNames:["任务#1"]});
   const workbook=new ExcelJS.Workbook();await workbook.xlsx.load(buffer as unknown as ExcelJS.Buffer);const sheet=workbook.getWorksheet("门店汇总");assert.ok(sheet);
   assert.deepEqual((sheet.getRow(1).values as unknown[]).slice(1),["门店名称","门店地址","500米住宅小区数量","800米住宅小区数量"]);
-  assert.equal(sheet.getRow(2).getCell(1).value,"'=测试门店");
+  assert.equal(sheet.getRow(2).getCell(1).value,"'=用户原表门店");
   assert.equal(sheet.getRow(2).getCell(2).value,"测试路1号");
   assert.equal(sheet.getRow(2).getCell(3).value,1);
   assert.equal(sheet.getRow(2).getCell(4).value,"");
