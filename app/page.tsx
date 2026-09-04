@@ -507,9 +507,14 @@ function BatchExport({api}:{api:string}){
 }
 
 function LoginScreen({onLogin}:{onLogin:(user:AuthUser)=>void}){
-  const [email,setEmail]=useState(""),[password,setPassword]=useState(""),[busy,setBusy]=useState(false),[error,setError]=useState("");
+  const [email,setEmail]=useState(""),[password,setPassword]=useState(""),[busy,setBusy]=useState(false),[error,setError]=useState(""),[wecomEnabled,setWecomEnabled]=useState(false);
+  useEffect(()=>{
+    void request<{enabled:boolean}>("/auth/wecom/config").then(data=>setWecomEnabled(data.enabled)).catch(()=>setWecomEnabled(false));
+    const params=new URLSearchParams(window.location.search),message=params.get("wecom_error");
+    if(message){setError(message);params.delete("wecom_error");window.history.replaceState({},"",`${window.location.pathname}${params.size?`?${params.toString()}`:""}${window.location.hash}`)}
+  },[]);
   async function submit(event:React.FormEvent){event.preventDefault();setBusy(true);setError("");try{onLogin(await request<AuthUser>("/auth/login",{method:"POST",body:JSON.stringify({email,password})}))}catch(e){setError(e instanceof Error?e.message:"登录失败")}finally{setBusy(false)}}
-  return <div className="auth-page"><form className="auth-card" onSubmit={submit}><div className="auth-brand">界</div><h1>登录店界 POI</h1><p>儿童健康饮品活动门店分析平台</p>{error&&<div className="error">{error}</div>}<label>邮箱<input type="email" autoComplete="username" value={email} onChange={e=>setEmail(e.target.value)} required/></label><label>密码<input type="password" autoComplete="current-password" value={password} onChange={e=>setPassword(e.target.value)} required/></label><button className="primary" disabled={busy}>{busy?"正在登录…":"登录"}</button><small>账号由系统管理员创建</small></form></div>
+  return <div className="auth-page"><form className="auth-card" onSubmit={submit}><div className="auth-brand">界</div><h1>登录店界 POI</h1><p>儿童健康饮品活动门店分析平台</p>{error&&<div className="error">{error}</div>}{wecomEnabled&&<><a className="wecom-login" href={`${API}/auth/wecom/start`}><span>企</span>企业微信扫码登录</a><div className="auth-divider"><i/>或使用账号密码<i/></div></>}<label>邮箱<input type="email" autoComplete="username" value={email} onChange={e=>setEmail(e.target.value)} required/></label><label>密码<input type="password" autoComplete="current-password" value={password} onChange={e=>setPassword(e.target.value)} required/></label><button className="primary" disabled={busy}>{busy?"正在登录…":"登录"}</button><small>{wecomEnabled?"企业成员首次扫码将自动创建账号":"账号由系统管理员创建"}</small></form></div>
 }
 
 function AdminUsers(){

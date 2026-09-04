@@ -8,6 +8,7 @@ import Redis from "ioredis";
 import pinoHttp from "pino-http";
 import ExcelJS from "exceljs";
 import fs from "node:fs/promises";
+import crypto from "node:crypto";
 import { authenticate, createSession, destroySession, requireAdmin, verifyPassword } from "./auth.js";
 import { audit, pool, query } from "./db.js";
 import { analyzeImportMapping, parseImportRows } from "./import-reader.js";
@@ -18,6 +19,7 @@ import { buildBatchExportWorkbook, EXPORT_BASE_FIELDS, type ExportSelection } fr
 import { createAiExport, normalizeAiExportRequest, previewAiExport, serializeAiExport } from "./ai-export.js";
 import { normalizeActivityConfig, validateActivityConfig } from "./activity-ai.js";
 import { analysisResults, BRAND_EXPORT_FIELDS, brandStoreFacets, buildAnalysisResultsWorkbook, buildBrandStoreWorkbook, cleanupBrandLibraryRetention, createAnalysisJobFromLibrary, createBrandExport, createDiscoveryJob, estimateAnalysis, listBrands, listBrandStoreIds, listBrandStores, listDiscoveryJobStoreIds, listProvinceCities, normalizePoiConditions, PROVINCES, serializeBrandExport, serializeDiscoveryJob, usageSummary } from "./brand-library.js";
+import { buildWeComLoginUrl, createWeComState, getWeComAccessToken, getWeComIdentity, getWeComMember, readWeComConfig, safeNextPath, type WeComConfig, type WeComMember } from "./wecom-auth.js";
 
 const app=express(),upload=multer({storage:multer.memoryStorage(),limits:{fileSize:Number(process.env.MAX_UPLOAD_MB||15)*1024*1024}}),redis=new Redis(redisUrl,{maxRetriesPerRequest:1});
 app.set("trust proxy",1);app.use(helmet({contentSecurityPolicy:false}));app.use(compression());app.use(express.json({limit:"2mb"}));app.use(cookieParser());app.use(pinoHttp({redact:["req.headers.authorization","req.headers.cookie","res.headers.set-cookie","req.body.password"]}));
@@ -31,6 +33,54 @@ app.use((req,res,next)=>{if(["GET","HEAD","OPTIONS"].includes(req.method))return
 
 app.get("/api/health",async(_req,res)=>{try{await query("SELECT 1");await redis.ping();ok(res,{status:"ok",database:"postgresql",queue:"redis",mock:false,web_key:Boolean(process.env.AMAP_WEB_SERVICE_KEY),js_key:Boolean(process.env.NEXT_PUBLIC_AMAP_JS_KEY),coordinate_system:"GCJ-02",runtime:"node"})}catch(error){fail(res,error instanceof Error?error.message:"依赖服务异常",503,"UNHEALTHY")}});
 app.post("/api/auth/login",async(req,res)=>{const email=clean(req.body?.email),password=String(req.body?.password||"");const attempts=Number(await redis.get(`login:${ip(req)}:${email.toLowerCase()}`)||0);if(attempts>=10)return fail(res,"登录失败次数过多，请 15 分钟后再试",429);const userId=await verifyPassword(email,password);if(!userId){const key=`login:${ip(req)}:${email.toLowerCase()}`;await redis.multi().incr(key).expire(key,900).exec();return fail(res,"邮箱或密码错误",401)}await createSession(userId,res);await redis.del(`login:${ip(req)}:${email.toLowerCase()}`);const user=(await query<Row>("SELECT id,tenant_id,email,display_name,role FROM users WHERE id=$1",[userId])).rows[0];await audit(Number(user.tenant_id),userId,"login","user",userId,ip(req));ok(res,{id:Number(user.id),email:user.email,display_name:user.display_name,role:user.role})});
+app.get("/api/auth/wecom/config",(_req,res)=>ok(res,{enabled:Boolean(readWeComConfig())}));
+
+async function resolveWeComUser(config:WeComConfig,member:WeComMember){
+  const existing=(await query<Row>("SELECT id,tenant_id,email,display_name,role FROM users WHERE wecom_corp_id=$1 AND wecom_user_id=$2 ORDER BY id LIMIT 1",[config.corpId,member.userid])).rows[0];
+  if(existing){await query("UPDATE users SET display_name=$1,wecom_avatar=$2 WHERE id=$3",[member.name,member.avatar||null,existing.id]);return {...existing,display_name:member.name}}
+  let tenantId=config.tenantId;
+  if(tenantId){const tenant=(await query<Row>("SELECT id FROM tenants WHERE id=$1",[tenantId])).rows[0];if(!tenant)throw new Error("企业微信绑定的组织不存在")}
+  else tenantId=Number((await query<Row>("SELECT id FROM tenants ORDER BY id LIMIT 1")).rows[0]?.id||0);
+  if(!tenantId)throw new Error("店界 POI 尚未初始化组织")
+  if(member.email){
+    const byEmail=(await query<Row>("SELECT id,tenant_id,email,display_name,role,wecom_corp_id,wecom_user_id FROM users WHERE tenant_id=$1 AND lower(email)=lower($2) ORDER BY id LIMIT 1",[tenantId,member.email])).rows[0];
+    if(byEmail){
+      if(byEmail.wecom_user_id&&String(byEmail.wecom_user_id)!==member.userid)throw new Error("该企业邮箱已绑定其他企业微信成员")
+      await query("UPDATE users SET wecom_corp_id=$1,wecom_user_id=$2,wecom_avatar=$3,display_name=$4 WHERE id=$5",[config.corpId,member.userid,member.avatar||null,member.name,byEmail.id]);
+      return {...byEmail,display_name:member.name};
+    }
+  }
+  const identityHash=crypto.createHash("sha256").update(`${config.corpId}\0${member.userid}`).digest("hex").slice(0,24);
+  const accountEmail=member.email||`wecom-${identityHash}@sso.invalid`;
+  const passwordHash=await bcrypt.hash(crypto.randomBytes(48).toString("base64url"),12);
+  try{return (await query<Row>("INSERT INTO users(tenant_id,email,display_name,password_hash,role,wecom_corp_id,wecom_user_id,wecom_avatar) VALUES($1,$2,$3,$4,'member',$5,$6,$7) RETURNING id,tenant_id,email,display_name,role",[tenantId,accountEmail,member.name,passwordHash,config.corpId,member.userid,member.avatar||null])).rows[0]}
+  catch(error){const raced=(await query<Row>("SELECT id,tenant_id,email,display_name,role FROM users WHERE wecom_corp_id=$1 AND wecom_user_id=$2 ORDER BY id LIMIT 1",[config.corpId,member.userid])).rows[0];if(raced)return raced;throw error}
+}
+
+app.get("/api/auth/wecom/start",async(req,res)=>{
+  try{
+    const config=readWeComConfig();if(!config)return res.redirect(303,"/?wecom_error="+encodeURIComponent("企业微信登录尚未启用"));
+    const state=createWeComState(),next=safeNextPath(req.query.next);
+    await redis.set(`wecom:state:${state}`,JSON.stringify({next}),"EX",300,"NX");
+    const requested=clean(req.query.mode),inWeCom=/wxwork/i.test(String(req.headers["user-agent"]||""));
+    const mode=requested==="oauth"||inWeCom?"oauth":"qr";
+    res.redirect(302,buildWeComLoginUrl(config,state,mode));
+  }catch(error){res.redirect(303,"/?wecom_error="+encodeURIComponent(error instanceof Error?error.message:"企业微信登录失败"))}
+});
+
+app.get("/api/auth/wecom/callback",async(req,res)=>{
+  try{
+    const config=readWeComConfig();if(!config)throw new Error("企业微信登录尚未启用");
+    const state=clean(req.query.state),code=clean(req.query.code||req.query.auth_code);if(!state||!code)throw new Error("企业微信未返回有效授权信息");
+    const stored=await redis.eval("local v=redis.call('GET',KEYS[1]); if v then redis.call('DEL',KEYS[1]) end; return v",1,`wecom:state:${state}`) as string|null;
+    if(!stored)throw new Error("登录请求已过期，请重新扫码");
+    const next=safeNextPath((JSON.parse(stored) as {next?:unknown}).next);
+    const accessToken=await getWeComAccessToken(config,redis),identity=await getWeComIdentity(accessToken,code),member=await getWeComMember(accessToken,identity.userid);
+    const user=await resolveWeComUser(config,member),userId=Number(user.id),tenantId=Number(user.tenant_id);
+    await createSession(userId,res);await audit(tenantId,userId,"login_wecom","user",userId,ip(req),{wecom_user_id:member.userid});
+    res.redirect(303,next);
+  }catch(error){const message=(error instanceof Error?error.message:"企业微信登录失败").slice(0,180);res.redirect(303,"/?wecom_error="+encodeURIComponent(message))}
+});
 app.post("/api/auth/logout",authenticate,async(req,res)=>{await audit(req.user!.tenantId,req.user!.id,"logout","user",req.user!.id,ip(req));await destroySession(req,res);ok(res,{})});
 app.get("/api/auth/me",authenticate,(req,res)=>ok(res,req.user));
 app.post("/api/auth/change-password",authenticate,async(req,res)=>{const current=String(req.body.current_password||""),next=String(req.body.new_password||"");if(next.length<12)return fail(res,"新密码至少 12 位");const row=(await query<Row>("SELECT password_hash FROM users WHERE id=$1",[req.user!.id])).rows[0];if(!row||!await bcrypt.compare(current,row.password_hash))return fail(res,"当前密码错误",401);const passwordHash=await bcrypt.hash(next,12);await query("UPDATE users SET password_hash=$1 WHERE id=$2",[passwordHash,req.user!.id]);await query("DELETE FROM sessions WHERE user_id=$1",[req.user!.id]);await audit(req.user!.tenantId,req.user!.id,"change_password","user",req.user!.id,ip(req));res.clearCookie("storemap_session",{path:"/"});ok(res,{},"密码已修改，请重新登录")});

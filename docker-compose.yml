@@ -75,6 +75,11 @@ services:
       RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-180}
       SESSION_HOURS: ${SESSION_HOURS:-12}
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-15}
+      WECOM_CORP_ID: ${WECOM_CORP_ID:-}
+      WECOM_AGENT_ID: ${WECOM_AGENT_ID:-}
+      WECOM_CORP_SECRET: ${WECOM_CORP_SECRET:-}
+      WECOM_CALLBACK_URL: ${WECOM_CALLBACK_URL:-}
+      WECOM_TENANT_ID: ${WECOM_TENANT_ID:-}
     depends_on:
       migrate: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
