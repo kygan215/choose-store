@@ -8,6 +8,9 @@ x-app-env: &app-env
   NEXT_PUBLIC_AMAP_SECURITY_CODE: ${NEXT_PUBLIC_AMAP_SECURITY_CODE}
   AMAP_REQUEST_INTERVAL_MS: ${AMAP_REQUEST_INTERVAL_MS:-100}
   AMAP_REQUEST_TIMEOUT: ${AMAP_REQUEST_TIMEOUT:-15}
+  BRAND_DISCOVERY_MAX_PAGES_PER_REGION: ${BRAND_DISCOVERY_MAX_PAGES_PER_REGION:-20}
+  BRAND_DISCOVERY_MAX_REQUESTS: ${BRAND_DISCOVERY_MAX_REQUESTS:-160}
+  AMAP_DAILY_LIMIT: ${AMAP_DAILY_LIMIT:-2000}
   DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
   DEEPSEEK_API_BASE_URL: ${DEEPSEEK_API_BASE_URL:-https://api.deepseek.com}
   DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-flash}
@@ -75,6 +78,9 @@ services:
     depends_on:
       migrate: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
+    volumes:
+      - ai_export_files:/app/outputs/ai-exports
+      - brand_export_files:/app/outputs/brand-exports
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 10s
@@ -95,6 +101,9 @@ services:
     depends_on:
       migrate: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
+    volumes:
+      - ai_export_files:/app/outputs/ai-exports
+      - brand_export_files:/app/outputs/brand-exports
     networks: [internal]
 
   web:
@@ -141,3 +150,5 @@ networks:
 volumes:
   postgres_data:
   redis_data:
+  ai_export_files:
+  brand_export_files:

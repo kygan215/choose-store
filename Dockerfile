@@ -38,5 +38,6 @@ COPY --from=runtime-dependencies /app/node_modules ./node_modules
 COPY package.json package-lock.json tsconfig.json ./
 COPY server ./server
 COPY app/api/deepseek.ts ./app/api/deepseek.ts
+COPY app/scoring.ts ./app/scoring.ts
 EXPOSE 8000
 CMD ["node","--import","tsx","server/index.ts"]
