@@ -15,7 +15,7 @@
 - 独立“品牌门店库”：按省、市和多品牌后台检索，缓存、分页、任务进度、跨页筛选与选择、字段化 Excel 导出；可按多个 POI 条件（且/或）反查门店。已取消全国入口。
 - 品牌检索是“高德当前可检索到的有效品牌 POI”，不是品牌总部官方全量名册；受高德分页、检索覆盖和每日额度限制。
 - 登录与权限：邮箱密码登录、多租户/账号任务隔离、管理员账号管理；已实现企业微信自建应用扫码/OAuth 登录及自动绑定/建号。
-- 正式部署：当前代码为 GitHub `main` 的 `3e9c598`（`feat: expand brand library batch selection`），生产目录 `/opt/choose-store-3e9c598`；域名 `https://choose.zhekou.zirancuishipin.com/`，服务器 `47.122.104.65`。API、Web、Worker、Nginx、PostgreSQL、Redis、Backup 容器均在运行，健康接口正常。
+- 正式部署：当前代码为 GitHub `main` 的 `1733dc5`（`fix: serialize store match candidates as JSON`），生产目录 `/opt/choose-store-1733dc5`；域名 `https://choose.zhekou.zirancuishipin.com/`，服务器 `47.122.104.65`。API、Web、Worker、Nginx、PostgreSQL、Redis、Backup 容器均在运行，健康接口正常。
 
 ## 3. 关键技术决策
 
@@ -34,6 +34,7 @@
 - `server/index.ts`：API 路由、认证、任务、导入导出入口。
 - `server/store-search.ts`：高德门店搜索、候选匹配、照片解析。
 - `server/store-resolution.ts`、`server/import-reader.ts`：智能字段识别与门店定位。
+- `server/store-match.ts`：将门店匹配候选显式序列化为合法 JSON 数据库参数。
 - `server/brand-library.ts`、`server/worker.ts`：品牌库查询、筛选导出和后台任务。
 - `server/activity-ai.ts`、`server/ai-export.ts`、`server/batch-export.ts`：AI 和 Excel 导出。
 - `server/wecom-auth.ts`：企业微信授权 URL、令牌、成员信息及配置读取。
@@ -52,6 +53,7 @@
 - 烟雾测试发现的 `found_stores` 城市范围统计问题已在本地修正：任务进度和最终结果均按任务所选省/市/品牌计数，不再混入同省其他城市；已增加单城市、多城市和全省展开 3 类回归场景。
 - 共享品牌门店数据已上线品牌、省份、城市三组多选筛选，可对组合结果执行跨页批量选择，并继续用于导出或 POI 条件反查；旧的单值接口参数保持兼容。“临时新品牌”已调整为“其余品牌”，由用户输入后直接启用并参与本次查询，不再等待管理员审核。
 - 2026-09-07 发布前完整测试 77/77、`npm run typecheck`、生产构建均通过；源码定向 ESLint 为 0 错误、3 个既有非阻断警告。部署前数据库备份为 `/opt/choose-store-b907f70/backups/predeploy-3e9c598-a9f4.dump`，旧发布目录继续保留用于回滚；部署后 Compose 健康、登录保护、企业微信配置和外部 HTTPS 健康接口均通过。
+- 任务 #59 的 347 家门店曾全部报 `invalid input syntax for type json`。根因是 `node-postgres` 会把直接传入的 JavaScript 候选数组编码为 PostgreSQL 数组文本，而 `match_candidates_json` 是 `jsonb`；批量匹配与人工重新搜索现已统一先做 JSON 序列化。修复后完整测试 78/78、类型检查和生产构建通过，生产冒烟门店 6108 成功写入候选，任务 #59 重试后 347/347 全部已确认、失败为 0。部署前备份为 `/opt/choose-store-3e9c598/backups/predeploy-1733dc5.dump`。
 - 本地工作树有多个用户自己的未跟踪目录/压缩包（`.tmp/`、PPT 依赖、`projects/`、归档包等）；不要清理、提交或覆盖。
 - `README.md` 的启动部分仍偏向旧 Python 原型，后续应拆分“旧原型”和“当前正式版”说明。
 
@@ -101,7 +103,7 @@ ssh -i C:\Users\1\.ssh\choose_store_ed25519 root@47.122.104.65
 服务器上始终显式传入环境文件，避免 Compose 把变量当成空值：
 
 ```bash
-cd /opt/choose-store-b907f70
+cd /opt/choose-store-1733dc5
 docker compose --env-file .env.production ps
 docker compose --env-file .env.production logs --tail=200 api worker
 docker compose --env-file .env.production up -d --build
