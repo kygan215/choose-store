@@ -15,7 +15,7 @@
 - 独立“品牌门店库”：按省、市和多品牌后台检索，缓存、分页、任务进度、跨页筛选与选择、字段化 Excel 导出；可按多个 POI 条件（且/或）反查门店。已取消全国入口。
 - 品牌检索是“高德当前可检索到的有效品牌 POI”，不是品牌总部官方全量名册；受高德分页、检索覆盖和每日额度限制。
 - 登录与权限：邮箱密码登录、多租户/账号任务隔离、管理员账号管理；已实现企业微信自建应用扫码/OAuth 登录及自动绑定/建号。
-- 正式部署：当前代码为 GitHub `main` 的 `1733dc5`（`fix: serialize store match candidates as JSON`），生产目录 `/opt/choose-store-1733dc5`；域名 `https://choose.zhekou.zirancuishipin.com/`，服务器 `47.122.104.65`。API、Web、Worker、Nginx、PostgreSQL、Redis、Backup 容器均在运行，健康接口正常。
+- 正式部署：生产运行代码对应 GitHub 提交 `1733dc5`（`fix: serialize store match candidates as JSON`），生产目录 `/opt/choose-store-1733dc5`；域名 `https://choose.zhekou.zirancuishipin.com/`，服务器 `47.122.104.65`。API、Web、Worker、Nginx、PostgreSQL、Redis、Backup 容器均在运行，健康接口正常。
 
 ## 3. 关键技术决策
 
