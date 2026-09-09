@@ -54,7 +54,7 @@
 - 共享品牌门店数据已上线品牌、省份、城市三组多选筛选，可对组合结果执行跨页批量选择，并继续用于导出或 POI 条件反查；旧的单值接口参数保持兼容。“临时新品牌”已调整为“其余品牌”，由用户输入后直接启用并参与本次查询，不再等待管理员审核。
 - 2026-09-07 发布前完整测试 77/77、`npm run typecheck`、生产构建均通过；源码定向 ESLint 为 0 错误、3 个既有非阻断警告。部署前数据库备份为 `/opt/choose-store-b907f70/backups/predeploy-3e9c598-a9f4.dump`，旧发布目录继续保留用于回滚；部署后 Compose 健康、登录保护、企业微信配置和外部 HTTPS 健康接口均通过。
 - 任务 #59 的 347 家门店曾全部报 `invalid input syntax for type json`。根因是 `node-postgres` 会把直接传入的 JavaScript 候选数组编码为 PostgreSQL 数组文本，而 `match_candidates_json` 是 `jsonb`；批量匹配与人工重新搜索现已统一先做 JSON 序列化。修复后完整测试 78/78、类型检查和生产构建通过，生产冒烟门店 6108 成功写入候选，任务 #59 重试后 347/347 全部已确认、失败为 0。部署前备份为 `/opt/choose-store-3e9c598/backups/predeploy-1733dc5.dump`。
-- 2026-09-09 高德额度排查确认：额度是同租户共享，不是个人独立额度。截图中的账号是侯维维，但当天 1800 次后台保护额度由谢文静创建的 7 个品牌查询任务和 5 个 POI 分析任务消耗（品牌查询累计 318 次，其余 1482 次来自 POI 分析）。首月不设置个人额度或个人上限，只在管理员“账号与额度”页面观察每位用户的调用次数、任务与查询内容。已上线逐次调用归属表和任务内容表，并把占额与日志写入合并为同一条数据库语句；同时将额度日切从 PostgreSQL UTC `CURRENT_DATE` 修正为北京时间。新增迁移 `007_amap_usage_events.sql`，完整测试 82/82、类型检查和生产构建通过；生产代码提交 `b6f3d65`，发布目录 `/opt/choose-store-b6f3d65`，部署前备份 `/opt/choose-store-1733dc5/backups/predeploy-b6f3d65.dump`。上线前当天的 1800 次旧用量保留为未归属历史汇总，不强行写入个人审计日志；上线后的调用开始精确记录。
+- 2026-09-09 高德额度排查确认并完成两阶段上线：先增加管理员调用监控与逐次归属日志，随后按业务确认取消全部个人上限、组织上限和 90% 保护线。系统仍按北京时间累计调用并同步用户、任务和查询内容，但任何内部累计值都不再暂停任务；高德平台自身返回的官方配额或限流错误仍照常展示。无限额版本完整测试 82/82、类型检查和生产构建通过；生产代码提交 `40ac52b`，发布目录 `/opt/choose-store-40ac52b`，部署前备份 `/opt/choose-store-b6f3d65/backups/predeploy-40ac52b.dump`。上线前当天的旧用量保留为未归属历史汇总，不强行写入个人审计日志。
 - 本地工作树有多个用户自己的未跟踪目录/压缩包（`.tmp/`、PPT 依赖、`projects/`、归档包等）；不要清理、提交或覆盖。
 - `README.md` 的启动部分仍偏向旧 Python 原型，后续应拆分“旧原型”和“当前正式版”说明。
 
@@ -104,7 +104,7 @@ ssh -i C:\Users\1\.ssh\choose_store_ed25519 root@47.122.104.65
 服务器上始终显式传入环境文件，避免 Compose 把变量当成空值：
 
 ```bash
-cd /opt/choose-store-b6f3d65
+cd /opt/choose-store-40ac52b
 docker compose --env-file .env.production ps
 docker compose --env-file .env.production logs --tail=200 api worker
 docker compose --env-file .env.production up -d --build
