@@ -21,7 +21,7 @@ async function runCachedDiscoveryScenario(cities:string[],stores:Array<{brand_na
   };
   await processDiscoveryJob(17,1,2,{
     query:fakeQuery,
-    consumeBackgroundQuota:async()=>({used:1,limit:2000,background_limit:1800,remaining:1999}),
+    consumeBackgroundQuota:async()=>({used:1,unlimited:true,limit:null,background_limit:null,remaining:null}),
     listProvinceCities:async()=>provinceCities.map((name,index)=>({name,adcode:String(index)})),
   });
   return serializeDiscoveryJob(job);

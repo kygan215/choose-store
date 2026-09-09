@@ -29,25 +29,21 @@ export async function consumeBackgroundQuota(
   attribution: AmapUsageAttribution = {},
   runQuery: UsageQuery = query as UsageQuery,
 ) {
-  const limit = Math.max(1, Number(process.env.AMAP_DAILY_LIMIT || 2000));
-  const backgroundLimit = Math.max(1, Math.floor(limit * .9));
   const result = await runQuery(
     `WITH reserved AS (
       INSERT INTO amap_usage_daily(tenant_id,usage_date,used_calls)
       VALUES($1,(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Shanghai')::date,1)
       ON CONFLICT(tenant_id,usage_date) DO UPDATE
       SET used_calls=amap_usage_daily.used_calls+1,updated_at=NOW()
-      WHERE amap_usage_daily.used_calls<$2
       RETURNING used_calls,usage_date
     ), logged AS (
       INSERT INTO amap_usage_events(tenant_id,user_id,usage_date,source_type,source_id,operation,calls,details_json,created_at)
-      SELECT $1,$3,usage_date,$4,$5,$6,1,$7::jsonb,NOW() FROM reserved
+      SELECT $1,$2,usage_date,$3,$4,$5,1,$6::jsonb,NOW() FROM reserved
       RETURNING id
     )
     SELECT used_calls FROM reserved`,
     [
       tenantId,
-      backgroundLimit,
       attribution.userId || null,
       attribution.sourceType || "unattributed",
       attribution.sourceId == null ? null : String(attribution.sourceId),
@@ -55,25 +51,22 @@ export async function consumeBackgroundQuota(
       JSON.stringify(attribution.details || {}),
     ],
   );
-  if (!result.rows.length) throw new QuotaPauseError("今日高德后台任务额度已达到90%，任务已自动暂停");
   const used = Number(result.rows[0].used_calls);
-  return { used, limit, background_limit: backgroundLimit, remaining: Math.max(0, limit - used) };
+  return { used, unlimited: true, limit: null, background_limit: null, remaining: null };
 }
 
 export const isQuotaPauseError = (error: unknown) => error instanceof QuotaPauseError;
 
 export async function usageSummary(tenantId: number, runQuery: UsageQuery = query as UsageQuery) {
-  const limit = Math.max(1, Number(process.env.AMAP_DAILY_LIMIT || 2000));
   const used = Number((await runQuery(
     "SELECT used_calls FROM amap_usage_daily WHERE tenant_id=$1 AND usage_date=(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Shanghai')::date",
     [tenantId],
   )).rows[0]?.used_calls || 0);
-  return { limit, used, remaining: Math.max(0, limit - used), background_limit: Math.floor(limit * .9), reserve: Math.ceil(limit * .1), percent: Math.round(used / limit * 100) };
+  return { unlimited: true, limit: null, used, remaining: null, background_limit: null, reserve: 0, percent: 0 };
 }
 
 export async function adminUsageReport(tenantId: number, dateInput: unknown, runQuery: UsageQuery = query as UsageQuery) {
   const date = normalizeUsageDate(dateInput);
-  const limit = Math.max(1, Number(process.env.AMAP_DAILY_LIMIT || 2000));
   const used = Number((await runQuery(
     "SELECT used_calls FROM amap_usage_daily WHERE tenant_id=$1 AND usage_date=$2::date",
     [tenantId, date],
@@ -119,10 +112,11 @@ export async function adminUsageReport(tenantId: number, dateInput: unknown, run
   return {
     date,
     usage: {
-      limit,
+      unlimited: true,
+      limit: null,
       used,
-      remaining: Math.max(0, limit - used),
-      background_limit: Math.floor(limit * .9),
+      remaining: null,
+      background_limit: null,
       logged_calls: loggedCalls,
       unlogged_calls: Math.max(0, used - loggedCalls),
     },

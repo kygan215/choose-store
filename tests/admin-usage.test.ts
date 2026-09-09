@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { adminUsageReport, consumeBackgroundQuota, normalizeUsageDate, QuotaPauseError } from "../server/amap-usage.js";
+import { adminUsageReport, consumeBackgroundQuota, normalizeUsageDate } from "../server/amap-usage.js";
 
 test("额度占用与用户调用日志在同一条数据库语句中完成", async () => {
   let capturedSql = "";
@@ -23,8 +23,10 @@ test("额度占用与用户调用日志在同一条数据库语句中完成", as
   assert.match(capturedSql, /INSERT INTO amap_usage_daily/);
   assert.match(capturedSql, /INSERT INTO amap_usage_events/);
   assert.match(capturedSql, /Asia\/Shanghai/);
-  assert.deepEqual(capturedValues.slice(2, 6), [33, "poi_analysis", "76", "poi_around_search"]);
-  assert.deepEqual(JSON.parse(String(capturedValues[6])), { store_id: 6108, category: "小学", page: 1, radius: 500 });
+  assert.doesNotMatch(capturedSql, /WHERE amap_usage_daily\.used_calls/);
+  assert.deepEqual(capturedValues.slice(1, 5), [33, "poi_analysis", "76", "poi_around_search"]);
+  assert.deepEqual(JSON.parse(String(capturedValues[5])), { store_id: 6108, category: "小学", page: 1, radius: 500 });
+  assert.equal(result.unlimited, true);
 });
 
 test("管理员日期筛选只接受标准日期并默认北京时间当天", () => {
@@ -32,16 +34,11 @@ test("管理员日期筛选只接受标准日期并默认北京时间当天", ()
   assert.match(normalizeUsageDate("not-a-date"), /^\d{4}-\d{2}-\d{2}$/);
 });
 
-test("额度达到后台保护线时不写调用日志并返回暂停错误", async () => {
-  let calls = 0;
-  await assert.rejects(
-    consumeBackgroundQuota(1, { userId: 10 }, async () => {
-      calls += 1;
-      return { rows: [] };
-    }),
-    QuotaPauseError,
-  );
-  assert.equal(calls, 1);
+test("累计调用量再高也不触发个人或组织上限", async () => {
+  const result = await consumeBackgroundQuota(1, { userId: 10 }, async () => ({ rows: [{ used_calls: 99999 }] }));
+  assert.equal(result.used, 99999);
+  assert.equal(result.unlimited, true);
+  assert.equal(result.limit, null);
 });
 
 test("管理员报表按全量用户汇总计算精确归属，不受调用明细 500 条上限影响", async () => {
