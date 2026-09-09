@@ -21,6 +21,7 @@ import { createAiExport, normalizeAiExportRequest, previewAiExport, serializeAiE
 import { normalizeActivityConfig, validateActivityConfig } from "./activity-ai.js";
 import { analysisResults, BRAND_EXPORT_FIELDS, brandStoreFacets, buildAnalysisResultsWorkbook, buildBrandStoreWorkbook, cleanupBrandLibraryRetention, createAnalysisJobFromLibrary, createBrandExport, createDiscoveryJob, estimateAnalysis, listBrands, listBrandStoreIds, listBrandStores, listDiscoveryJobStoreIds, listProvinceCities, normalizePoiConditions, PROVINCES, serializeBrandExport, serializeDiscoveryJob, usageSummary } from "./brand-library.js";
 import { buildWeComLoginUrl, createWeComState, getWeComAccessToken, getWeComIdentity, getWeComMember, readWeComConfig, safeNextPath, type WeComConfig, type WeComMember } from "./wecom-auth.js";
+import { adminUsageReport } from "./amap-usage.js";
 
 const app=express(),upload=multer({storage:multer.memoryStorage(),limits:{fileSize:Number(process.env.MAX_UPLOAD_MB||15)*1024*1024}}),redis=new Redis(redisUrl,{maxRetriesPerRequest:1});
 app.set("trust proxy",1);app.use(helmet({contentSecurityPolicy:false}));app.use(compression());app.use(express.json({limit:"2mb"}));app.use(cookieParser());app.use(pinoHttp({redact:["req.headers.authorization","req.headers.cookie","res.headers.set-cookie","req.body.password"]}));
@@ -89,6 +90,7 @@ app.post("/api/auth/change-password",authenticate,async(req,res)=>{const current
 
 app.use("/api",authenticate);
 app.get("/api/admin/users",requireAdmin,async(req,res)=>{const rows=(await query<Row>("SELECT id,email,display_name,role,active,created_at FROM users WHERE tenant_id=$1 ORDER BY id",[req.user!.tenantId])).rows;ok(res,rows)});
+app.get("/api/admin/amap-usage",requireAdmin,async(req,res,next)=>{try{ok(res,await adminUsageReport(req.user!.tenantId,req.query.date))}catch(error){next(error)}});
 app.post("/api/admin/users",requireAdmin,async(req,res)=>{const email=clean(req.body.email).toLowerCase(),displayName=clean(req.body.display_name),password=String(req.body.password||""),role=req.body.role==="admin"?"admin":"member";if(!email||!displayName||password.length<10)return fail(res,"姓名、邮箱必填，密码至少 10 位");const passwordHash=await bcrypt.hash(password,12);try{const row=(await query<Row>("INSERT INTO users(tenant_id,email,display_name,password_hash,role) VALUES($1,$2,$3,$4,$5) RETURNING id,email,display_name,role,active,created_at",[req.user!.tenantId,email,displayName,passwordHash,role])).rows[0];await audit(req.user!.tenantId,req.user!.id,"create_user","user",row.id,ip(req),{email,role});ok(res,row,"用户已创建",201)}catch{fail(res,"邮箱已存在",409)}});
 
 app.get("/api/poi-categories",(_req,res)=>ok(res,Object.keys(POI_CATEGORY_TYPES).concat("竞品门店").map((name,index)=>({id:index+1,name,display_name:name}))));

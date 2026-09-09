@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./globals.css";
 import { beijingDateKey, formatBeijingDate, formatBeijingDateTime, formatBeijingTime } from "./time";
 import { METRIC_LABELS, scoreBand } from "./scoring";
@@ -81,6 +81,10 @@ type MapStore = {name:string;location:[number,number]};
 type AiResult = {report_title:string;summary:string;primary_users:string[];age_segments:Array<{label:string;estimated_share:string;rationale:string}>;consumption_power:{level:string;score:number;rationale:string};radius_insights:string[];evidence:string[];confidence:{level:string;score:number;rationale:string};limitations:string[];parent_child_activity?:{fit_level:string;fit_score:number;audience_level:string;audience_score:number;core_child_age:string;touch_scenes:string[];evidence:string[]};activity_plan?:{theme:string;format_steps:string[];suggested_timing:string;resources_notes:string[]}};
 type AiVersion = {id:number;scope:"single"|"comparison";job_id:number|null;store_id:number|null;store_ids:number[];result:AiResult;model:string;prompt_version:string;usage:{input_tokens:number;output_tokens:number;total_tokens:number};created_at:string;store_labels?:Array<{store_id:number;label:string;name:string}>};
 type AuthUser={id:number;tenantId?:number;email:string;displayName?:string;display_name?:string;role:"admin"|"member"};
+type AdminUsageUser={user_id:number|null;display_name:string|null;email:string|null;used_calls:number;task_count:number;last_used_at:string|null};
+type AdminUsageEvent={id:number;user_id:number|null;display_name:string|null;email:string|null;source_type:string;source_id:string|null;operation:string;calls:number;details_json:Record<string,unknown>|null;created_at:string};
+type AdminUsageTask={source_type:string;source_id:string;user_id:number;display_name:string|null;email:string;status:string;title:string;content_json:unknown;regions_json:unknown;total_items:number;processed_items:number;recorded_calls:number;created_at:string;updated_at:string};
+type AdminUsageReport={date:string;usage:{limit:number;used:number;remaining:number;background_limit:number;logged_calls:number;unlogged_calls:number};users:AdminUsageUser[];events:AdminUsageEvent[];tasks:AdminUsageTask[]};
 type ExportField={id:string;label:string;group:string};
 type ExportOptions={jobs:JobRecord[];fields:ExportField[];required_fields:Array<{id:string;label:string}>;sheet_options:Array<{id:string;label:string}>};
 type ExportStoreItem={store:BatchStore;status:string;poi_summary:PoiSummary;has_profile:boolean;error_message?:string};
@@ -291,13 +295,13 @@ export default function Page() {
           <button className={tab==="jobs"?"active":""} onClick={()=>setTab("jobs")}>▤ 分析任务</button>
           <button className={tab==="exports"?"active":""} onClick={()=>setTab("exports")}>⇩ 批量导出</button>
           <button className={tab==="account"?"active":""} onClick={()=>setTab("account")}>♙ 账号安全</button>
-          {auth.user.role==="admin"&&<button className={tab==="admin"?"active":""} onClick={()=>setTab("admin")}>⚙ 账号管理</button>}
+          {auth.user.role==="admin"&&<button className={tab==="admin"?"active":""} onClick={()=>setTab("admin")}>⚙ 账号与额度</button>}
         </nav>
         <div className="side-foot"><i className={mode.web_key?"ok":""}/><div><b>{auth.user.displayName||auth.user.display_name||auth.user.email}</b><small>{mode.mock ? "演示模式" : "真实高德模式"} · <button onClick={logout}>退出</button></small></div></div>
       </aside>
 
       <main>
-        <header><div><h1>{tab==="single"?"单门店周边分析":tab==="brands"?"品牌门店库":tab==="batch"?"批量导入门店":tab==="exports"?"批量导出":tab==="admin"?"账号管理":tab==="account"?"账号安全":"分析任务"}</h1><p>{tab==="brands"?"按省市建立共享渠道品牌门店库，并按周边POI条件反查活动门店":tab==="exports"?"按任务、门店、分析半径和字段生成儿童健康饮品活动报告":"面向儿童健康饮品活动的门店周边设施与家庭客群环境分析"}</p></div>{!(["admin","account","exports","brands"] as string[]).includes(tab)&&<a className="download" href={`${API}/import/template`}>下载导入模板</a>}</header>
+        <header><div><h1>{tab==="single"?"单门店周边分析":tab==="brands"?"品牌门店库":tab==="batch"?"批量导入门店":tab==="exports"?"批量导出":tab==="admin"?"账号与额度":tab==="account"?"账号安全":"分析任务"}</h1><p>{tab==="brands"?"按省市建立共享渠道品牌门店库，并按周边POI条件反查活动门店":tab==="exports"?"按任务、门店、分析半径和字段生成儿童健康饮品活动报告":tab==="admin"?"查看组织账号、高德额度归属与具体分析任务":"面向儿童健康饮品活动的门店周边设施与家庭客群环境分析"}</p></div>{!(["admin","account","exports","brands"] as string[]).includes(tab)&&<a className="download" href={`${API}/import/template`}>下载导入模板</a>}</header>
         {mode.mock && <div className="banner">演示模式：地图及 POI 结果为明确标注的模拟数据，不代表真实高德查询结果。配置 Key 并关闭 Mock 后即可切换真实数据。</div>}
         {error && <div className="error">{error}<button onClick={()=>setError("")}>×</button></div>}
 
@@ -524,7 +528,33 @@ function AdminUsers(){
   async function load(){try{setUsers(await request("/admin/users") as typeof users)}catch(e){setNotice(e instanceof Error?e.message:"账号加载失败")}}
   useEffect(()=>{let active=true;const timer=window.setTimeout(()=>{void request("/admin/users").then(data=>{if(active)setUsers(data as typeof users)}).catch(e=>{if(active)setNotice(e instanceof Error?e.message:"账号加载失败")})},0);return()=>{active=false;window.clearTimeout(timer)}},[]);
   async function create(event:React.FormEvent){event.preventDefault();setBusy(true);setNotice("");try{await request("/admin/users",{method:"POST",body:JSON.stringify(form)});setForm({display_name:"",email:"",password:"",role:"member"});setNotice("账号创建成功");await load()}catch(e){setNotice(e instanceof Error?e.message:"账号创建失败")}finally{setBusy(false)}}
-  return <div className="admin-grid"><form className="panel admin-form" onSubmit={create}><h2>创建使用账号</h2><p>每个账号只能查看、分析和导出自己创建的任务。</p>{notice&&<div className="job-notice">{notice}</div>}<label>姓名<input value={form.display_name} onChange={e=>setForm({...form,display_name:e.target.value})} required/></label><label>邮箱<input type="email" value={form.email} onChange={e=>setForm({...form,email:e.target.value})} required/></label><label>初始密码<input type="password" minLength={10} value={form.password} onChange={e=>setForm({...form,password:e.target.value})} required/><small>至少 10 位，建议用户首次登录后更换</small></label><label>权限<select value={form.role} onChange={e=>setForm({...form,role:e.target.value})}><option value="member">普通成员</option><option value="admin">管理员</option></select></label><button className="primary" disabled={busy}>{busy?"正在创建…":"创建账号"}</button></form><section className="panel"><div className="panel-head"><div><h2>组织账号</h2><p>共 {users.length} 个账号</p></div></div><div className="table-wrap"><table><thead><tr><th>姓名</th><th>邮箱</th><th>角色</th><th>状态</th><th>创建时间（北京时间）</th></tr></thead><tbody>{users.map(user=><tr key={user.id}><td>{user.display_name}</td><td>{user.email}</td><td>{user.role==="admin"?"管理员":"成员"}</td><td>{user.active?"启用":"停用"}</td><td>{formatBeijingDate(user.created_at)}</td></tr>)}</tbody></table></div></section></div>
+  return <div className="admin-page"><AdminUsageMonitor/><div className="admin-grid"><form className="panel admin-form" onSubmit={create}><h2>创建使用账号</h2><p>每个账号只能查看、分析和导出自己创建的任务。</p>{notice&&<div className="job-notice">{notice}</div>}<label>姓名<input value={form.display_name} onChange={e=>setForm({...form,display_name:e.target.value})} required/></label><label>邮箱<input type="email" value={form.email} onChange={e=>setForm({...form,email:e.target.value})} required/></label><label>初始密码<input type="password" minLength={10} value={form.password} onChange={e=>setForm({...form,password:e.target.value})} required/><small>至少 10 位，建议用户首次登录后更换</small></label><label>权限<select value={form.role} onChange={e=>setForm({...form,role:e.target.value})}><option value="member">普通成员</option><option value="admin">管理员</option></select></label><button className="primary" disabled={busy}>{busy?"正在创建…":"创建账号"}</button></form><section className="panel"><div className="panel-head"><div><h2>组织账号</h2><p>共 {users.length} 个账号</p></div></div><div className="table-wrap"><table><thead><tr><th>姓名</th><th>邮箱</th><th>角色</th><th>状态</th><th>创建时间（北京时间）</th></tr></thead><tbody>{users.map(user=><tr key={user.id}><td>{user.display_name}</td><td>{user.email}</td><td>{user.role==="admin"?"管理员":"成员"}</td><td>{user.active?"启用":"停用"}</td><td>{formatBeijingDate(user.created_at)}</td></tr>)}</tbody></table></div></section></div></div>
+}
+
+const strings=(value:unknown)=>Array.isArray(value)?value.filter((item):item is string=>typeof item==="string"):[];
+const record=(value:unknown):Record<string,unknown>=>value!==null&&typeof value==="object"&&!Array.isArray(value)?value as Record<string,unknown>:{};
+const usageUserName=(item:{display_name:string|null;email:string|null})=>item.display_name||item.email||"系统任务";
+function usageTaskLabel(task:AdminUsageTask){
+  const content=record(task.content_json);
+  if(task.source_type==="brand_discovery"){
+    const brands=strings(task.content_json),cities=strings(task.regions_json);
+    return [brands.join("、"),task.title,cities.join("、")].filter(Boolean).join(" · ")||task.title;
+  }
+  const conditions=strings(content.categories);
+  return conditions.length?`${task.title} · ${conditions.join("、")}`:task.title;
+}
+function usageEventLabel(event:AdminUsageEvent){
+  const details=record(event.details_json);
+  if(event.source_type==="poi_analysis")return [details.store_name,details.category,details.radius?`${details.radius}米`:null,details.page?`第${details.page}页`:null].filter(Boolean).join(" · ");
+  if(event.source_type==="brand_discovery")return [details.province,details.city,details.brand,details.page?`第${details.page}页`:null].filter(Boolean).join(" · ");
+  return String(details.note||"历史用量汇总");
+}
+function AdminUsageMonitor(){
+  const [date,setDate]=useState(beijingDateKey()),[report,setReport]=useState<AdminUsageReport|null>(null),[loading,setLoading]=useState(false),[notice,setNotice]=useState("");
+  const load=useCallback(async()=>{setLoading(true);setNotice("");try{setReport(await request<AdminUsageReport>(`/admin/amap-usage?date=${encodeURIComponent(date)}`))}catch(e){setNotice(e instanceof Error?e.message:"额度日志加载失败")}finally{setLoading(false)}},[date]);
+  useEffect(()=>{const timer=window.setTimeout(()=>{void load()},0);return()=>window.clearTimeout(timer)},[load]);
+  const usage=report?.usage;
+  return <section className="panel admin-usage"><div className="panel-head usage-toolbar"><div><h2>高德调用监控</h2><p>仅观察全组织与各用户的实际使用情况，不设置个人额度或个人上限。</p></div><label>统计日期<input type="date" value={date} max={beijingDateKey()} onChange={event=>setDate(event.target.value)}/></label><button className="outline" onClick={()=>void load()} disabled={loading}>{loading?"加载中…":"刷新"}</button></div>{notice&&<div className="error">{notice}</div>}{usage&&<><div className="usage-kpis"><article><small>组织已用</small><b>{usage.used} / {usage.limit}</b></article><article><small>后台保护线</small><b>{usage.background_limit}</b></article><article><small>组织剩余</small><b>{usage.remaining}</b></article><article><small>已记录调用</small><b>{usage.logged_calls} 次</b></article></div>{usage.unlogged_calls>0&&<div className="usage-warning">其中 {usage.unlogged_calls} 次为日志功能上线前产生的调用，只能从任务汇总追溯，不能还原为逐次明细。</div>}<div className="usage-section"><h3>用户使用情况</h3><div className="table-wrap"><table><thead><tr><th>用户</th><th>调用次数</th><th>占组织当日用量</th><th>涉及任务</th><th>最后调用（北京时间）</th></tr></thead><tbody>{report.users.length?report.users.map(user=><tr key={user.user_id??"system"}><td><b>{usageUserName(user)}</b><small>{user.email||"—"}</small></td><td>{user.used_calls}</td><td>{usage.used?Math.round(user.used_calls/usage.used*100):0}%</td><td>{user.task_count}</td><td>{user.last_used_at?formatBeijingDateTime(user.last_used_at):"—"}</td></tr>):<tr><td colSpan={5}>该日期暂无精确归属日志</td></tr>}</tbody></table></div></div><div className="usage-section"><h3>分析任务</h3><div className="table-wrap usage-detail"><table><thead><tr><th>用户</th><th>任务类型</th><th>分析内容</th><th>进度 / 状态</th><th>任务调用</th><th>创建时间</th></tr></thead><tbody>{report.tasks.length?report.tasks.map(task=><tr key={`${task.source_type}-${task.source_id}`}><td>{usageUserName(task)}</td><td>{task.source_type==="brand_discovery"?"品牌门店查询":"POI 条件反查"}</td><td>{usageTaskLabel(task)}</td><td>{task.processed_items}/{task.total_items} · {task.status}</td><td>{task.recorded_calls}</td><td>{formatBeijingDateTime(task.created_at)}</td></tr>):<tr><td colSpan={6}>该日期没有相关任务</td></tr>}</tbody></table></div></div><div className="usage-section"><h3>调用明细</h3><div className="table-wrap usage-detail"><table><thead><tr><th>时间（北京时间）</th><th>用户</th><th>操作</th><th>任务</th><th>查询内容</th><th>次数</th></tr></thead><tbody>{report.events.length?report.events.map(event=><tr key={event.id}><td>{formatBeijingDateTime(event.created_at)}</td><td>{usageUserName(event)}</td><td>{event.operation}</td><td>{event.source_type} #{event.source_id||"—"}</td><td>{usageEventLabel(event)||"—"}</td><td>{event.calls}</td></tr>):<tr><td colSpan={6}>该日期暂无逐次调用明细</td></tr>}</tbody></table></div></div></>}</section>
 }
 
 function AccountSecurity({onChanged}:{onChanged:()=>void}){

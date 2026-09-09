@@ -59,14 +59,15 @@ export async function discoverBrandStores(brand:string,city:string,district="",r
 
 export async function geocode(body:Row){const address=[body.province,body.city,body.district,body.address||body.name].map(clean).join(""),data=await amap("/v3/geocode/geo",{address,city:clean(body.city)}),rows=Array.isArray(data.geocodes)?data.geocodes as Row[]:[];return rows.map((item,index)=>{const location=parseLocation(item.location);return location?{id:`GEO-${index}`,name:clean(body.name)||clean(item.formatted_address),formatted_address:clean(item.formatted_address),address:clean(item.formatted_address),province:clean(item.province),city:clean(item.city)||clean(body.city),district:clean(item.district),adcode:clean(item.adcode),location,type:"地址定位",typecode:"",score:58,status:"地址定位结果，待确认",reasons:["根据详细地址完成地理编码"],source:"amap_geocode",auto_confirm:false,photos:[],conflicts:[],warnings:["仅验证了地址位置，尚未验证门店身份"]}:null}).filter(Boolean)};
 
-export async function searchPois(store:Row,categories:string[],radii:number[],beforeRequest?:()=>Promise<void>){
+export type PoiRequestContext={category:string;page:number;radius:number};
+export async function searchPois(store:Row,categories:string[],radii:number[],beforeRequest?:(context:PoiRequestContext)=>Promise<void>){
   const maxRadius=Math.max(...radii),origin:[number,number]=[Number(store.longitude),Number(store.latitude)],items:Poi[]=[],maxPages=Math.max(1,Math.min(3,Number(process.env.AMAP_POI_MAX_PAGES||2))),targetBrand=inferSnackBrand(store.brand||store.input_name||store.standard_name),targetPoiId=clean(store.amap_poi_id);
   for(const category of [...new Set(categories)]){
     const types=POI_CATEGORY_TYPES[category]||"";
     for(let page=1;page<=maxPages;page++){
       const params:Row={location:origin.join(","),radius:maxRadius,sortrule:"distance",page_size:25,page_num:page,show_fields:"business,navi"};
       if(types)params.types=types;else params.keywords=category==="竞品门店"?"零食|量贩零食|折扣零食":category;
-      if(beforeRequest)await beforeRequest();const data=await amap("/v5/place/around",params),rows=Array.isArray(data.pois)?data.pois as Row[]:[];
+      if(beforeRequest)await beforeRequest({category,page,radius:maxRadius});const data=await amap("/v5/place/around",params),rows=Array.isArray(data.pois)?data.pois as Row[]:[];
       for(const raw of rows){
         const location=parseLocation(raw.location),name=clean(raw.name),id=clean(raw.id);if(!location)continue;
         const distance=Number(raw.distance)||haversine(origin,location);if(category==="竞品门店"&&(!looksLikeSnackCompetitor(name)||id===targetPoiId||(distance<=20&&name===clean(store.standard_name))))continue;
