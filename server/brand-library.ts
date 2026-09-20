@@ -11,14 +11,16 @@ export const DEFAULT_BRANDS=[
   {name:"零食很忙",aliases:["零食很忙"]},{name:"零食有鸣",aliases:["零食有鸣"]},{name:"赵一鸣零食",aliases:["赵一鸣零食","赵一鸣"]},
   {name:"好想来零食",aliases:["好想来零食乐园","好想来品牌零食","好想来零食","好想来","好像来"]},{name:"爱零食",aliases:["爱零食"]},
   {name:"来优品",aliases:["来优品"]},{name:"戴永红",aliases:["戴永红"]},{name:"糖巢",aliases:["糖巢"]},{name:"老婆大人",aliases:["老婆大人"]},
-  {name:"良品铺子",aliases:["良品铺子"]},{name:"来伊份",aliases:["来伊份"]},
+  {name:"陆小馋",aliases:["陆小馋"]},{name:"吖嘀吖嘀",aliases:["吖嘀吖嘀"]},{name:"来伊份",aliases:["来伊份"]},
 ];
+const RETIRED_DEFAULT_BRANDS=["良品铺子"];
 
 const uniqueStrings=(value:unknown)=>[...new Set((Array.isArray(value)?value:[]).map(clean).filter(Boolean))];
 const normalizeStatus=(value:unknown)=>["正常","新增","更新","疑似关闭","数据异常"].includes(clean(value))?clean(value):"";
 
 export async function ensureDefaultBrands(tenantId:number,userId:number){
   for(const brand of DEFAULT_BRANDS)await query("INSERT INTO brand_catalog(tenant_id,standard_name,aliases_json,approval_status,created_by) VALUES($1,$2,$3,'approved',$4) ON CONFLICT(tenant_id,standard_name) DO NOTHING",[tenantId,brand.name,JSON.stringify(brand.aliases),userId]);
+  await query("UPDATE brand_catalog SET active=FALSE,updated_at=NOW() WHERE tenant_id=$1 AND standard_name=ANY($2::text[]) AND active=TRUE",[tenantId,RETIRED_DEFAULT_BRANDS]);
 }
 
 export async function listBrands(tenantId:number,userId:number){await ensureDefaultBrands(tenantId,userId);return (await query<Row>("SELECT id,standard_name,aliases_json,approval_status,active,created_at,updated_at FROM brand_catalog WHERE tenant_id=$1 AND active=TRUE ORDER BY approval_status,standard_name",[tenantId])).rows.map(row=>({id:Number(row.id),name:row.standard_name,aliases:row.aliases_json||[],status:row.approval_status,active:row.active,created_at:row.created_at,updated_at:row.updated_at}))}
