@@ -4,10 +4,12 @@ import { DEFAULT_BRANDS, PROVINCES, processDiscoveryJob, serializeDiscoveryJob, 
 import { canonicalSnackBrand, isRetiredSnackBrand } from "../server/snack-brands.js";
 import type { Row } from "../server/services.js";
 
-async function runNational(options:{failProvince?:string;pause?:boolean;truncated?:boolean}={}) {
+async function runNational(options:{failProvince?:string;pause?:boolean;truncated?:boolean;concurrency?:number;pauseDuringQueries?:boolean}={}) {
   const job:Row={id:30,tenant_id:1,created_by:2,province:"全国",cities_json:[],brands_json:["好想来零食","零食悦"],status:"等待执行",control:"run",api_calls:0};
   const loaded:string[]=[],saved:Array<{province:string;city:string;brand:string}>=[];
+  let active=0,peak=0,started=0;
   const dependencies:DiscoveryJobDependencies={
+    concurrency:options.concurrency,
     query:async(sql,values=[])=>{
       if(sql.startsWith("SELECT * FROM brand_discovery_jobs"))return {rows:[job]};
       if(sql.startsWith("SELECT COUNT(*)"))return {rows:[{count:saved.length}]};
@@ -27,11 +29,11 @@ async function runNational(options:{failProvince?:string;pause?:boolean;truncate
       if(province===options.failProvince)throw new Error("区域接口失败");
       return [{name:`${province}第一市`,adcode:"1"},{name:`${province}第二市`,adcode:"2"}];
     },
-    discoverBrandStores:async(brand,city)=>({brand,city,district:"",stores:[],regions:["测试区"],requests:1,page_size:25,truncated:!!options.truncated,complete:!options.truncated}),
+    discoverBrandStores:async(brand,city)=>{active++;started++;peak=Math.max(peak,active);if(options.pauseDuringQueries&&started===3)job.control="pause";if(options.concurrency)await new Promise(resolve=>setTimeout(resolve,5));active--;return {brand,city,district:"",stores:[],regions:["测试区"],requests:1,page_size:25,truncated:!!options.truncated,complete:!options.truncated}},
     saveDiscoveredStores:async(_tenant,_job,brand,province,city)=>{saved.push({province,city,brand})},
   };
   await processDiscoveryJob(30,1,2,dependencies);
-  return {job:serializeDiscoveryJob(job),loaded,saved};
+  return {job:serializeDiscoveryJob(job),loaded,saved,peak,started};
 }
 
 test("全国任务展开全部省份所有城市，并为每个品牌保留正确省市归属",async()=>{
@@ -78,4 +80,11 @@ test("系统品牌名单只保留好想来，新增独立零食悦并禁止恢�
   assert.equal(canonicalSnackBrand("好像来零食"),"好想来");
   assert.equal(isRetiredSnackBrand("零食优选，零食悦，零食好能嗨"),true);
   assert.equal(isRetiredSnackBrand("零食悦"),false);
+});
+
+test("品牌任务按配置并行，进度计数不丢失",async()=>{
+ const result=await runNational({concurrency:3});assert.equal(result.peak,3);assert.equal(result.job.processed_units,result.saved.length);assert.equal(result.job.status,"已完成");
+});
+test("并行品牌任务暂停后只结束在途查询，不再派发新单元",async()=>{
+ const result=await runNational({concurrency:3,pauseDuringQueries:true});assert.equal(result.started,3);assert.equal(result.saved.length,3);assert.notEqual(result.job.status,"已完成");
 });

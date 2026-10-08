@@ -109,7 +109,7 @@ async function applyVerified() {
       amap_name=COALESCE(a.poi_json->>'name',b.amap_name),poi_type=COALESCE(a.poi_json->>'type',''),typecode=COALESCE(a.poi_json->>'typecode',''),updated_at=NOW()
       FROM maintenance_snack_audit a WHERE a.run_id=$1 AND a.store_id=b.id AND a.keep AND a.poi_json IS NOT NULL`,[runId]);
     const retained=Number((await client.query("SELECT COUNT(*) count FROM brand_stores")).rows[0].count);
-    await client.query(`UPDATE brand_region_cache c SET complete=FALSE,store_count=(SELECT COUNT(*) FROM brand_stores b WHERE b.tenant_id=c.tenant_id AND b.brand_name=c.brand_name AND b.province=c.province AND b.city=c.city)`);
+    await client.query(`UPDATE brand_region_cache c SET store_count=(SELECT COUNT(*) FROM brand_stores b WHERE b.tenant_id=c.tenant_id AND b.brand_name=c.brand_name AND b.province=c.province AND b.city=c.city)`);
     await client.query("COMMIT");
     console.log(JSON.stringify({phase:"cleanup_applied",runId,removed:removed.rowCount,retained,metadata_updated:updated.rowCount,archive:"maintenance_snack_removed"}));
   }catch(error){await client.query("ROLLBACK");throw error}finally{client.release()}

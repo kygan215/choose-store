@@ -16,7 +16,8 @@
     "server:api": "node --import tsx server/index.ts",
     "server:worker": "node --import tsx server/worker.ts",
     "server:migrate": "node --import tsx server/migrate.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:integration": "node --import tsx --test tests/*.integration.ts"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",

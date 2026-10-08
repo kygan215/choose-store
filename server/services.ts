@@ -1,3 +1,5 @@
+import { waitForAmapSlot } from "./amap-limiter.js";
+import { concurrencyLimit, forEachConcurrent } from "./concurrency.js";
 import { isSnackRetailStore } from "./snack-retail.js";
 import { DEFAULT_SNACK_BRANDS } from "./snack-brands.js";
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -15,7 +17,7 @@ export const PROFILE_CATEGORIES=["住宅小区","幼儿园","小学","中学","�
 const SNACK_BRANDS=[...DEFAULT_SNACK_BRANDS,{name:"恰货铺子",aliases:["恰货铺子"]}];
 export function inferSnackBrand(value:unknown){const name=clean(value).replace(/\s+/g,"");return SNACK_BRANDS.find(brand=>brand.aliases.some(alias=>name.includes(alias)))?.name||"其他折扣零食"}
 function looksLikeSnackCompetitor(value:unknown){const name=clean(value);return SNACK_BRANDS.some(brand=>brand.aliases.some(alias=>name.includes(alias)))||/(零食|量贩食品|食品折扣|折扣食品|休闲食品)/.test(name)}
-let lastAmap=0;
+
 const amapCache=new Map<string,{expires:number;data:Row}>();
 export const clean=(value:unknown)=>String(value??"").trim();
 const parseLocation=(value:unknown):[number,number]|null=>{const parts=clean(value).split(",").map(Number);return parts.length>=2&&parts.every(Number.isFinite)?[parts[0],parts[1]]:null};
@@ -23,9 +25,9 @@ const haversine=(a:[number,number],b:[number,number])=>{const r=6371000,toRad=(n
 const distanceBucket=(distance:number,radii:number[])=>{const sorted=[...radii].sort((a,b)=>a-b),hit=sorted.find(radius=>distance<=radius);return hit?`≤${hit}米`:`>${sorted.at(-1)||500}米`};
 
 async function amap(path:string,params:Record<string,unknown>){
-  const key=process.env.AMAP_WEB_SERVICE_KEY;if(!key)throw new Error("高德 Web Service Key 尚未配置");const interval=Math.max(50,Number(process.env.AMAP_REQUEST_INTERVAL_MS||100));
+  const key=process.env.AMAP_WEB_SERVICE_KEY;if(!key)throw new Error("高德 Web Service Key 尚未配置");
   const cacheKey=`${path}?${Object.entries(params).sort(([left],[right])=>left.localeCompare(right)).map(([name,value])=>`${name}=${String(value)}`).join("&")}`,cached=amapCache.get(cacheKey);if(cached&&cached.expires>Date.now())return cached.data;if(cached)amapCache.delete(cacheKey);
-  for(let attempt=0;attempt<3;attempt++){const wait=interval-(Date.now()-lastAmap);if(wait>0)await new Promise(resolve=>setTimeout(resolve,wait));lastAmap=Date.now();const url=new URL(`https://restapi.amap.com${path}`);Object.entries({...params,key}).forEach(([name,value])=>url.searchParams.set(name,String(value)));const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),Number(process.env.AMAP_REQUEST_TIMEOUT||15)*1000);try{const response=await fetch(url,{signal:controller.signal});const data=await response.json() as Row;if(String(data.status)==="1"){if(amapCache.size>=2000)amapCache.delete(amapCache.keys().next().value||"");amapCache.set(cacheKey,{expires:Date.now()+30*60*1000,data});return data}const code=clean(data.infocode);if(["10014","10015","10019","10020","10021","10022","10023"].includes(code)&&attempt<2){await new Promise(resolve=>setTimeout(resolve,(attempt+1)*1000));continue}throw new Error(code==="10003"?"高德地图当月调用额度已用完":`高德地图服务不可用：${clean(data.info)||code}`)}finally{clearTimeout(timer)}}throw new Error("高德地图请求失败");
+  for(let attempt=0;attempt<3;attempt++){await waitForAmapSlot();const url=new URL(`https://restapi.amap.com${path}`);Object.entries({...params,key}).forEach(([name,value])=>url.searchParams.set(name,String(value)));const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),Number(process.env.AMAP_REQUEST_TIMEOUT||15)*1000);try{const response=await fetch(url,{signal:controller.signal});const data=await response.json() as Row;if(String(data.status)==="1"){if(amapCache.size>=2000)amapCache.delete(amapCache.keys().next().value||"");amapCache.set(cacheKey,{expires:Date.now()+30*60*1000,data});return data}const code=clean(data.infocode);if(["10014","10015","10019","10020","10021","10022","10023"].includes(code)&&attempt<2){await new Promise(resolve=>setTimeout(resolve,(attempt+1)*1000));continue}throw new Error(code==="10003"?"高德地图当月调用额度已用完":`高德地图服务不可用：${clean(data.info)||code}`)}finally{clearTimeout(timer)}}throw new Error("高德地图请求失败");
 }
 
 export async function amapRequest(path:string,params:Record<string,unknown>){return amap(path,params)}
@@ -61,7 +63,8 @@ export async function geocode(body:Row){const address=[body.province,body.city,b
 export type PoiRequestContext={category:string;page:number;radius:number};
 export async function searchPois(store:Row,categories:string[],radii:number[],beforeRequest?:(context:PoiRequestContext)=>Promise<void>){
   const maxRadius=Math.max(...radii),origin:[number,number]=[Number(store.longitude),Number(store.latitude)],items:Poi[]=[],maxPages=Math.max(1,Math.min(3,Number(process.env.AMAP_POI_MAX_PAGES||2))),targetBrand=inferSnackBrand(store.brand||store.input_name||store.standard_name),targetPoiId=clean(store.amap_poi_id);
-  for(const category of [...new Set(categories)]){
+  const categoryOrder=[...new Set(categories)];
+  await forEachConcurrent(categoryOrder,concurrencyLimit(process.env.POI_CATEGORY_CONCURRENCY,1,8),async(category)=>{
     const types=POI_CATEGORY_TYPES[category]||"";
     for(let page=1;page<=maxPages;page++){
       const params:Row={location:origin.join(","),radius:maxRadius,sortrule:"distance",page_size:25,page_num:page,show_fields:"business,navi"};
@@ -75,7 +78,8 @@ export async function searchPois(store:Row,categories:string[],radii:number[],be
       }
       if(rows.length<25)break;
     }
-  }
+  });
+  items.sort((a,b)=>categoryOrder.indexOf(a.category)-categoryOrder.indexOf(b.category));
   const unique=new Map<string,Poi>();for(const item of items){const key=item.id||`${item.name}|${item.location.join(",")}`;if(!unique.has(key))unique.set(key,item)}return [...unique.values()].sort((a,b)=>a.distance-b.distance)
 }
 

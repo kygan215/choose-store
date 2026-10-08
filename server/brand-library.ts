@@ -1,3 +1,4 @@
+import { concurrencyLimit, forEachConcurrent } from "./concurrency.js";
 import { amapTel } from "../app/amap-contact.js";
 import { amapRating } from "../app/amap-rating.js";
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -63,7 +64,7 @@ async function saveDiscoveredStores(tenantId:number,jobId:number,brand:string,pr
 }
 
 type DiscoveryQuery=(text:string,values?:unknown[])=>Promise<{rows:Row[];rowCount?:number|null}>;
-export type DiscoveryJobDependencies={query?:DiscoveryQuery;listProvinceCities?:typeof listProvinceCities;consumeBackgroundQuota?:typeof consumeBackgroundQuota;discoverBrandStores?:typeof discoverBrandStores;saveDiscoveredStores?:typeof saveDiscoveredStores};
+export type DiscoveryJobDependencies={concurrency?:number;query?:DiscoveryQuery;listProvinceCities?:typeof listProvinceCities;consumeBackgroundQuota?:typeof consumeBackgroundQuota;discoverBrandStores?:typeof discoverBrandStores;saveDiscoveredStores?:typeof saveDiscoveredStores};
 
 export async function processDiscoveryJob(jobId:number,tenantId:number,userId:number,dependencies:DiscoveryJobDependencies={}){
   const runQuery=dependencies.query||(query as DiscoveryQuery),loadProvinceCities=dependencies.listProvinceCities||listProvinceCities,consumeQuota=dependencies.consumeBackgroundQuota||consumeBackgroundQuota,discover=dependencies.discoverBrandStores||discoverBrandStores,save=dependencies.saveDiscoveredStores||saveDiscoveredStores;
@@ -85,8 +86,40 @@ export async function processDiscoveryJob(jobId:number,tenantId:number,userId:nu
     if(!nationwide)cities=regionCities;
   }
   const brands=uniqueStrings(uniqueStrings(record.brands_json).map(canonicalSnackBrand)).filter(name=>!isRetiredSnackBrand(name)),catalog=(await runQuery("SELECT standard_name,aliases_json FROM brand_catalog WHERE tenant_id=$1 AND standard_name=ANY($2::text[])",[tenantId,brands])).rows,brandAliases=new Map(catalog.map(item=>[clean(item.standard_name),uniqueStrings(item.aliases_json)])),total=regions.length*brands.length;await runQuery("UPDATE brand_discovery_jobs SET cities_json=$1,total_units=$2,processed_units=0,cached_units=0,status='正在查询',api_calls=$3,updated_at=NOW() WHERE id=$4 AND control='run'",[JSON.stringify(cities),total,apiCalls,jobId]);
-  for(const {province,city} of regions)for(const brand of brands){record=(await runQuery("SELECT * FROM brand_discovery_jobs WHERE id=$1",[jobId])).rows[0];if(record.control!=="run")return;const current=`${province} · ${city} · ${brand}`;await runQuery("UPDATE brand_discovery_jobs SET current_region=$1,updated_at=NOW() WHERE id=$2",[current,jobId]);const cache=(await runQuery("SELECT * FROM brand_region_cache WHERE tenant_id=$1 AND brand_name=$2 AND province=$3 AND city=$4 AND complete=TRUE AND filter_version=3 AND refreshed_at>NOW()-INTERVAL '30 days'",[tenantId,brand,province,city])).rows[0];if(cache&&!record.force_refresh){await runQuery(`UPDATE brand_discovery_jobs SET processed_units=processed_units+1,cached_units=cached_units+1,found_stores=(SELECT COUNT(*) FROM brand_stores WHERE ${snackRetailSql()} AND tenant_id=$1 AND brand_name=ANY($2::text[]) AND ($3='全国' OR province=$3) AND (cardinality($4::text[])=0 OR city=ANY($4::text[]))),updated_at=NOW() WHERE id=$5`,[tenantId,brands,record.province,cities,jobId]);continue}
-    let unitCalls=0;try{const result=await discover(brand,city,"",async(path,params)=>{await consumeQuota(tenantId,{userId,sourceType:"brand_discovery",sourceId:jobId,operation:"brand_store_search",details:{province,city,brand,path,page:params.page_num||params.page}});unitCalls++;return amapRequest(path,params)},brandAliases.get(brand)||[brand]);apiCalls+=unitCalls;await save(tenantId,jobId,brand,province,city,result.stores,result.complete);if(!result.complete)errors.push(`${current}：检索达到分页或请求上限，结果未完整`);await runQuery(`UPDATE brand_discovery_jobs SET processed_units=processed_units+1,api_calls=$1,found_stores=(SELECT COUNT(*) FROM brand_stores WHERE ${snackRetailSql()} AND tenant_id=$2 AND brand_name=ANY($3::text[]) AND ($4='全国' OR province=$4) AND (cardinality($5::text[])=0 OR city=ANY($5::text[]))),error_message=$6,updated_at=NOW() WHERE id=$7`,[apiCalls,tenantId,brands,record.province,cities,errors.join("；")||null,jobId])}catch(error){apiCalls+=unitCalls;if(error instanceof QuotaPauseError){await runQuery("UPDATE brand_discovery_jobs SET status='额度暂停',control='auto',api_calls=$1,error_message=$2,current_region='',updated_at=NOW() WHERE id=$3",[apiCalls,error.message,jobId]);await scheduleDiscoveryResume(jobId,tenantId,userId);return}errors.push(`${current}：${error instanceof Error?error.message:"查询失败"}`);await runQuery("UPDATE brand_discovery_jobs SET processed_units=processed_units+1,api_calls=$1,error_message=$2,updated_at=NOW() WHERE id=$3",[apiCalls,errors.slice(-20).join("；"),jobId])}}
+  const concurrency=concurrencyLimit(dependencies.concurrency??process.env.BRAND_DISCOVERY_CONCURRENCY,1,12);
+  let stopped=false;
+  await forEachConcurrent(regions.flatMap(region=>brands.map(brand=>({...region,brand}))),concurrency,async({province,city,brand})=>{
+    if(stopped)return;
+    const state=(await runQuery("SELECT * FROM brand_discovery_jobs WHERE id=$1",[jobId])).rows[0];
+    if(state?.control!=="run"){stopped=true;return}
+    const current=`${province} · ${city} · ${brand}${concurrency>1?`（${concurrency}组并行）`:""}`;
+    await runQuery("UPDATE brand_discovery_jobs SET current_region=$1,updated_at=NOW() WHERE id=$2 AND control='run'",[current,jobId]);
+    const cache=(await runQuery("SELECT * FROM brand_region_cache WHERE tenant_id=$1 AND brand_name=ANY($2::text[]) AND province=$3 AND city=$4 AND refreshed_at>NOW()-INTERVAL '30 days' ORDER BY refreshed_at DESC LIMIT 1",[tenantId,brand==="好想来"?[brand,...LEGACY_HAOXIANGLAI]:[brand],province,city])).rows[0];
+    if(cache&&!state.force_refresh){
+      if(!cache.complete&&!errors.some(message=>message.startsWith("已复用部分缓存")))errors.push("已复用部分缓存，已有门店可直接使用；如需重新检索或补全，请勾选忽略30天缓存");
+      await runQuery(`UPDATE brand_discovery_jobs SET processed_units=processed_units+1,cached_units=cached_units+1,found_stores=(SELECT COUNT(*) FROM brand_stores WHERE ${snackRetailSql()} AND tenant_id=$1 AND brand_name=ANY($2::text[]) AND ($3='全国' OR province=$3) AND (cardinality($4::text[])=0 OR city=ANY($4::text[]))),updated_at=NOW() WHERE id=$5`,[tenantId,brands,state.province,cities,jobId]);
+      return;
+    }
+    let unitCalls=0;
+    try {
+      const result=await discover(brand,city,"",async(path,params)=>{
+        await consumeQuota(tenantId,{userId,sourceType:"brand_discovery",sourceId:jobId,operation:"brand_store_search",details:{province,city,brand,path,page:params.page_num||params.page}});
+        unitCalls++;return amapRequest(path,params);
+      },brandAliases.get(brand)||[brand]);
+      await save(tenantId,jobId,brand,province,city,result.stores,result.complete);
+      if(!result.complete)errors.push(`${current}：检索达到分页或请求上限，结果未完整`);
+      await runQuery(`UPDATE brand_discovery_jobs SET processed_units=processed_units+1,api_calls=api_calls+$1,found_stores=(SELECT COUNT(*) FROM brand_stores WHERE ${snackRetailSql()} AND tenant_id=$2 AND brand_name=ANY($3::text[]) AND ($4='全国' OR province=$4) AND (cardinality($5::text[])=0 OR city=ANY($5::text[]))),error_message=$6,updated_at=NOW() WHERE id=$7`,[unitCalls,tenantId,brands,state.province,cities,errors.slice(-20).join("；")||null,jobId]);
+    } catch(error) {
+      if(error instanceof QuotaPauseError){
+        await runQuery("UPDATE brand_discovery_jobs SET api_calls=api_calls+$1,updated_at=NOW() WHERE id=$2",[unitCalls,jobId]);
+        if(!stopped){stopped=true;await runQuery("UPDATE brand_discovery_jobs SET status='额度暂停',control='auto',error_message=$1,current_region='',updated_at=NOW() WHERE id=$2 AND control='run'",[error.message,jobId]);await scheduleDiscoveryResume(jobId,tenantId,userId)}
+        return;
+      }
+      errors.push(`${current}：${error instanceof Error?error.message:"查询失败"}`);
+      await runQuery("UPDATE brand_discovery_jobs SET processed_units=processed_units+1,api_calls=api_calls+$1,error_message=$2,updated_at=NOW() WHERE id=$3",[unitCalls,errors.slice(-20).join("；"),jobId]);
+    }
+  });
+  if(stopped||(await runQuery("SELECT * FROM brand_discovery_jobs WHERE id=$1",[jobId])).rows[0]?.control!=="run")return;
   const count=Number((await runQuery(`SELECT COUNT(*) count FROM brand_stores WHERE ${snackRetailSql()} AND tenant_id=$1 AND brand_name=ANY($2::text[]) AND ($3='全国' OR province=$3) AND (cardinality($4::text[])=0 OR city=ANY($4::text[]))`,[tenantId,brands,record.province,cities])).rows[0]?.count||0);await runQuery("UPDATE brand_discovery_jobs SET status=$1,control='idle',found_stores=$2,current_region='',completed_at=NOW(),error_message=$4,updated_at=NOW() WHERE id=$3",[errors.length?"部分完成":"已完成",count,jobId,errors.join("；")||null]);
 }
 
