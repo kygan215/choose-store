@@ -39,7 +39,7 @@ export async function resolveStoreCandidates(input:Partial<StoreResolutionInput>
   if(directPoiId){
     const data=await amap("/v5/place/detail",{id:directPoiId,show_fields:"business,navi,photos"}),rows=Array.isArray(data.pois)?data.pois as Row[]:[];
     const found=rows.length?await searchStoreCandidates(async()=>({status:"1",pois:rows}),baseName||clean(rows[0].name),clean(input.city),clean(input.district),address,1):[];
-    if(found[0]){found[0].score=100;found[0].reasons.unshift("用户提供的高德 POI ID 完全一致");found[0].auto_confirm=true;found[0].status="高置信度";return found}
+    if(found[0]){found[0].score=100;found[0].reasons.unshift("用户提供的高德 POI ID 完全一致");found[0].auto_confirm=!found[0].requires_review;found[0].status=found[0].requires_review?"标签待核验":"高置信度";return found}
   }
   if(Number.isFinite(longitude)&&longitude>=73&&longitude<=136&&Number.isFinite(latitude)&&latitude>=3&&latitude<=54){
     const data=await amap("/v3/geocode/regeo",{location:`${longitude},${latitude}`,radius:1000,extensions:"base"}),component=(data.regeocode?.addressComponent||{}) as Row,actualCity=clean(component.city)||clean(component.province),actualDistrict=clean(component.district),expectedCity=clean(input.city).replace(/市$/,"");

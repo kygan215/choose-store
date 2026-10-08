@@ -8,7 +8,7 @@ export type StoreResolutionInput={
 
 export type ResolutionCandidate={
   id:string;name:string;address:string;location:[number,number];score:number;status:string;
-  reasons:string[];conflicts?:string[];warnings?:string[];auto_confirm:boolean;
+  reasons:string[];conflicts?:string[];warnings?:string[];auto_confirm:boolean;requires_review?:boolean;
 };
 
 const clean=(value:unknown)=>String(value??"").trim();
@@ -50,7 +50,7 @@ export function classifyResolutionCandidates<T extends ResolutionCandidate>(inpu
   const candidates=input.map(candidate=>({...candidate,auto_confirm:false,warnings:[...(candidate.warnings||[])]})),first=candidates[0],second=candidates[1];
   if(!first)return {status:"没有候选",autoConfirm:false,ambiguous:false,candidates};
   const hardConflict=Boolean(first.conflicts?.some(item=>/品牌|城市|详细地址/.test(item))),ambiguous=Boolean(second&&first.score-second.score<8&&first.id!==second.id);
-  const autoConfirm=first.score>=85&&!hardConflict&&!ambiguous;
+  const autoConfirm=first.score>=85&&!hardConflict&&!ambiguous&&!first.requires_review;
   first.auto_confirm=autoConfirm;
   first.status=autoConfirm?"高置信度":first.score>=60?(ambiguous?"候选相近，需要确认":"中置信度，待确认"):"低置信度，待确认";
   if(ambiguous)first.warnings?.push(`前两名仅相差 ${Math.max(0,first.score-second!.score)} 分，需要人工确认`);

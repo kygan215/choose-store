@@ -1,19 +1,17 @@
 import { pathToFileURL } from "node:url";
 import { pool, query } from "../server/db.js";
 import { consumeBackgroundQuota } from "../server/amap-usage.js";
-import { isSnackRetailStore, snackTags } from "../server/snack-retail.js";
-import { canonicalSnackBrand, isRetiredSnackBrand } from "../server/snack-brands.js";
+import { hasClearlyNonSnackEvidence, isSnackRetailStore, snackTags } from "../server/snack-retail.js";
 
 type Row = Record<string, any>;
-export function verifiedSnackDecision(brand: string, poi: Row | null) {
-  if (!poi) return {keep:false,reason:"高德按ID复核未返回门店"};
-  if (isRetiredSnackBrand(canonicalSnackBrand(brand))) return {keep:false,reason:"已移除品牌"};
-  if (!/零食/.test(`${poi.type || ""};${snackTags(poi)}`)) return {keep:false,reason:"高德当前分类和标签不含零食"};
-  if (!isSnackRetailStore(poi)) return {keep:false,reason:"名称或具体分类属于非零食零售"};
-  return {keep:true,reason:"高德零食标签核验通过"};
+export function verifiedSnackDecision(_brand: string, poi: Row | null) {
+  if (!poi) return {keep:true,reason:"高德未返回详情，保留待核验"};
+  if (hasClearlyNonSnackEvidence(poi)) return {keep:false,reason:"名称明确指向非目标门店"};
+  if (isSnackRetailStore(poi)) return {keep:true,reason:/零食/.test(`${poi.type || ""};${snackTags(poi)}`)?"高德零食标签核验通过":"目标品牌使用日杂店或综合超市标签，保留"};
+  return {keep:true,reason:"标签不足以判定，保留待核验"};
 }
 
-const runId = "snack-labels-20261008";
+const runId = "snack-brands-20261008-v5";
 const sleep = (ms:number) => new Promise(resolve => setTimeout(resolve,ms));
 let nextStart=0,interval=125,requests=0;
 async function details(ids:string[],tenantId:number):Promise<Row[]> {
@@ -54,6 +52,17 @@ async function status() {
   return {runId,...stats,remaining,reasons};
 }
 async function auditAll() {
+  // Reuse fetched POIs, but recompute every decision under the revised rule.
+  const previous=(await query(`SELECT DISTINCT ON(b.id) b.id,b.brand_name,b.amap_poi_id,b.updated_at::text AS updated_at,a.poi_json
+    FROM brand_stores b JOIN maintenance_snack_audit a ON a.store_id=b.id AND a.run_id IN ('snack-labels-20261008','snack-brands-20261008-v2') AND a.snapshot_updated_at=b.updated_at
+    LEFT JOIN maintenance_snack_audit current ON current.store_id=b.id AND current.run_id=$1 WHERE current.store_id IS NULL ORDER BY b.id,a.checked_at DESC`,[runId])).rows;
+  for(let offset=0;offset<previous.length;offset+=500){
+    const entries=previous.slice(offset,offset+500).map(row=>({store_id:row.id,poi_id:row.amap_poi_id,snapshot_updated_at:row.updated_at,...verifiedSnackDecision(row.brand_name,row.poi_json),poi_json:row.poi_json}));
+    await query(`INSERT INTO maintenance_snack_audit(run_id,store_id,poi_id,snapshot_updated_at,keep,reason,poi_json)
+      SELECT $1,x.store_id,x.poi_id,x.snapshot_updated_at,x.keep,x.reason,x.poi_json FROM jsonb_to_recordset($2::jsonb) AS x(store_id BIGINT,poi_id TEXT,snapshot_updated_at TIMESTAMPTZ,keep BOOLEAN,reason TEXT,poi_json JSONB)
+      ON CONFLICT(run_id,store_id) DO NOTHING`,[runId,JSON.stringify(entries)]);
+  }
+  console.log(JSON.stringify({phase:"reclassified_previous_audit",records:previous.length}));
   const rows=(await query(`SELECT b.id,b.tenant_id,b.brand_name,b.amap_poi_id,b.updated_at::text AS updated_at FROM brand_stores b LEFT JOIN maintenance_snack_audit a ON a.run_id=$1 AND a.store_id=b.id AND a.snapshot_updated_at=b.updated_at WHERE a.store_id IS NULL ORDER BY b.tenant_id,b.id`,[runId])).rows;
   let cursor=0,processed=0,stopping=false;
   console.log(JSON.stringify({phase:"audit_started",pending:rows.length}));
@@ -96,12 +105,13 @@ async function applyVerified() {
     const removed=await client.query(`DELETE FROM brand_stores b USING maintenance_snack_audit a WHERE a.run_id=$1 AND a.store_id=b.id AND NOT a.keep`,[runId]);
     const updated=await client.query(`UPDATE brand_stores b SET
       raw_json=b.raw_json || jsonb_build_object('name',COALESCE(a.poi_json->>'name',b.amap_name),'business',a.poi_json->'business','tag',concat_ws(';',a.poi_json#>>'{business,tag}',a.poi_json#>>'{business,rectag}',a.poi_json#>>'{business,keytag}'),'type',a.poi_json->>'type','typecode',a.poi_json->>'typecode','rating',a.poi_json#>'{business,rating}','tel',a.poi_json#>'{business,tel}'),
-      data_status=CASE WHEN b.amap_name IS DISTINCT FROM a.poi_json->>'name' THEN '更新' ELSE b.data_status END,
+      data_status=CASE WHEN a.poi_json IS NOT NULL AND b.amap_name IS DISTINCT FROM a.poi_json->>'name' THEN '更新' ELSE b.data_status END,
       amap_name=COALESCE(a.poi_json->>'name',b.amap_name),poi_type=COALESCE(a.poi_json->>'type',''),typecode=COALESCE(a.poi_json->>'typecode',''),updated_at=NOW()
-      FROM maintenance_snack_audit a WHERE a.run_id=$1 AND a.store_id=b.id AND a.keep`,[runId]);
+      FROM maintenance_snack_audit a WHERE a.run_id=$1 AND a.store_id=b.id AND a.keep AND a.poi_json IS NOT NULL`,[runId]);
+    const retained=Number((await client.query("SELECT COUNT(*) count FROM brand_stores")).rows[0].count);
     await client.query(`UPDATE brand_region_cache c SET complete=FALSE,store_count=(SELECT COUNT(*) FROM brand_stores b WHERE b.tenant_id=c.tenant_id AND b.brand_name=c.brand_name AND b.province=c.province AND b.city=c.city)`);
     await client.query("COMMIT");
-    console.log(JSON.stringify({phase:"cleanup_applied",runId,removed:removed.rowCount,retained:updated.rowCount,archive:"maintenance_snack_removed"}));
+    console.log(JSON.stringify({phase:"cleanup_applied",runId,removed:removed.rowCount,retained,metadata_updated:updated.rowCount,archive:"maintenance_snack_removed"}));
   }catch(error){await client.query("ROLLBACK");throw error}finally{client.release()}
 }
 async function main(){await ensureAudit();if(process.argv.includes("--audit"))await auditAll();else if(process.argv.includes("--apply"))await applyVerified();else console.log(JSON.stringify(await status()));}

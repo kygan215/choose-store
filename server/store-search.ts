@@ -2,14 +2,14 @@ import { amapRating } from "../app/amap-rating.js";
 import { amapTel } from "../app/amap-contact.js";
 import { DEFAULT_SNACK_BRANDS, isRetiredSnackBrand } from "./snack-brands.js";
 import { classifyResolutionCandidates } from "./store-resolution.js";
-import { isSnackRetailStore, snackTags } from "./snack-retail.js";
+import { canRetainSnackStore, isSnackRetailStore, snackTags } from "./snack-retail.js";
 
 export type SearchRow=Record<string,unknown>;
 export type StorePhoto={title:string;url:string};
 export type StoreCandidate={
   id:string;name:string;address:string;province:string;city:string;district:string;
   location:[number,number];type:string;typecode:string;tag?:string;rating?:number|null;tel?:string|null;score:number;status:string;
-  reasons:string[];source:string;search_query:string;auto_confirm:boolean;photos:StorePhoto[];conflicts:string[];warnings:string[];
+  reasons:string[];source:string;search_query:string;auto_confirm:boolean;requires_review?:boolean;photos:StorePhoto[];conflicts:string[];warnings:string[];
 };
 export type StoreSearchPlan={
   original:string;brand:string;core:string;province:string;city:string;district:string;
@@ -142,7 +142,8 @@ function dice(a:string,b:string){const left=bigrams(a),right=bigrams(b);if(!left
 function coverage(a:string,b:string){const left=bigrams(a),right=bigrams(b);if(!left.size||!right.size)return 0;let common=0;for(const token of left)if(right.has(token))common++;return common/left.size}
 
 export function scoreStoreCandidate(raw:SearchRow,plan:StoreSearchPlan,source="text",searchQuery=""):StoreCandidate|null{
-  if((plan.brand||/零食/.test(plan.original))&&!isSnackRetailStore(raw))return null;
+  if((plan.brand||/零食/.test(plan.original))&&!canRetainSnackStore(raw,plan.brand))return null;
+  const needsReview=Boolean(plan.brand||/零食/.test(plan.original))&&!isSnackRetailStore(raw);
   const location=parseLocation(raw.location);if(!location)return null;
   const name=clean(raw.name),address=clean(raw.address),regionPath=parseRegionPath(raw.district);
   const poiProvince=clean(raw.pname||raw.province)||regionPath.province||plan.province;
@@ -164,7 +165,7 @@ export function scoreStoreCandidate(raw:SearchRow,plan:StoreSearchPlan,source="t
   if(plan.brand&&!brandMatch)score=Math.min(score,60);
   const strongGeographicMatch=(matchedHints.length>=2&&geographicCoverage>=0.45)||geographicCoverage>=0.72||(matchedHints.length>=1&&geographicCoverage>=0.58);
   if(addressConflict)score=Math.max(0,score-15);
-  const autoConfirm=score>=85&&brandMatch&&!addressConflict&&(coreMatch||similarity>=0.72||strongGeographicMatch);
+  const autoConfirm=!needsReview&&score>=85&&brandMatch&&!addressConflict&&(coreMatch||similarity>=0.72||strongGeographicMatch);
   const reasons=[
     normalizedName===target?"标准化后的门店名称完全一致":coreMatch?`核心店名“${plan.core}”一致`:"按名称与地址地理要素综合排序",
     brandMatch&&plan.brand?`品牌“${plan.brand}”一致`:"品牌信息不足",
@@ -175,7 +176,7 @@ export function scoreStoreCandidate(raw:SearchRow,plan:StoreSearchPlan,source="t
     ...(source==="landmark_nearby"?[`以“${plan.core}”为地标完成周边品牌回退搜索`]:[]),
   ];
   const conflicts=[...(!brandMatch&&plan.brand?[`品牌冲突：期望“${plan.brand}”，候选为“${candidateBrand?.group.canonical||name}”`]:[]),...(plan.city&&poiCity&&!cityMatch?[`城市冲突：期望“${plan.city}”，候选为“${poiCity}”`]:[]),...(addressConflict?["详细地址关键词与候选名称及地址未对应"]:[])];
-  return {id:clean(raw.id)||`${name}|${location.join(",")}`,name,address,province:poiProvince,city:poiCity,district:poiDistrict,location,type:clean(raw.type),typecode:clean(raw.typecode),tag:snackTags(raw),rating:amapRating(raw),tel:amapTel(raw),score,status:autoConfirm?"高置信度":score>=55?"中置信度":"低置信度",reasons,source,search_query:searchQuery,auto_confirm:autoConfirm,photos:normalizeStorePhotos(raw.photos),conflicts,warnings:[]};
+  return {id:clean(raw.id)||`${name}|${location.join(",")}`,name,address,province:poiProvince,city:poiCity,district:poiDistrict,location,type:clean(raw.type),typecode:clean(raw.typecode),tag:snackTags(raw),rating:amapRating(raw),tel:amapTel(raw),score,status:autoConfirm?"高置信度":score>=55?"中置信度":"低置信度",reasons,source,search_query:searchQuery,auto_confirm:autoConfirm,photos:normalizeStorePhotos(raw.photos),conflicts,warnings:needsReview?["高德标签不足以核验，疑似目标门店已保留，请核对后确认"]:[]};
 }
 
 function mergeCandidate(target:Map<string,StoreCandidate>,candidate:StoreCandidate|null){
@@ -191,9 +192,9 @@ function brandMatches(name:string,terms:string[]){
 }
 
 function discoveryCandidate(raw:SearchRow,brand:string,terms:string[]):StoreCandidate|null{
-  const location=parseLocation(raw.location),name=clean(raw.name);if(!location||!name||!brandMatches(name,terms)||!isSnackRetailStore(raw))return null;
+  const location=parseLocation(raw.location),name=clean(raw.name);if(!location||!name||!brandMatches(name,terms)||!canRetainSnackStore(raw,brand))return null;
   const regionPath=parseRegionPath(raw.district),province=clean(raw.pname||raw.province)||regionPath.province,city=clean(raw.cityname||raw.city)||regionPath.city,district=clean(raw.adname)||regionPath.district;
-  return {id:clean(raw.id)||`${name}|${location.join(",")}`,name,address:clean(raw.address),province,city,district,location,type:clean(raw.type),typecode:clean(raw.typecode),tag:snackTags(raw),rating:amapRating(raw),tel:amapTel(raw),score:100,status:"品牌命中",reasons:[`门店名称包含品牌关键词“${brand}”`,`来自高德品牌门店分页查询`],source:"brand_discovery",search_query:brand,auto_confirm:true,photos:normalizeStorePhotos(raw.photos),conflicts:[],warnings:[]};
+  return {id:clean(raw.id)||`${name}|${location.join(",")}`,name,address:clean(raw.address),province,city,district,location,type:clean(raw.type),typecode:clean(raw.typecode),tag:snackTags(raw),rating:amapRating(raw),tel:amapTel(raw),score:100,status:"品牌命中",reasons:[`门店名称包含品牌关键词“${brand}”`,`来自高德品牌门店分页查询`],source:"brand_discovery",search_query:brand,auto_confirm:isSnackRetailStore(raw),photos:normalizeStorePhotos(raw.photos),conflicts:[],warnings:isSnackRetailStore(raw)?[]:["高德标签待核验，疑似目标门店已保留"]};
 }
 
 export async function discoverBrandStores(amap:AmapSearch,brandInput:string,cityInput:string,districtInput="",options:{maxPagesPerRegion?:number;maxRequests?:number;aliases?:string[]}={}):Promise<BrandStoreDiscoveryResult>{
@@ -279,5 +280,8 @@ export async function searchStoreCandidates(amap:AmapSearch,input:string,city=""
     ranked=[...found.values()].sort((a,b)=>b.score-a.score);
   }
   if(address)ranked=ranked.map(item=>({...item,reasons:unique([...item.reasons,"已参考用户填写的详细地址"])}));
-  return classifyResolutionCandidates(ranked.slice(0,20)).candidates;
+  return classifyResolutionCandidates(ranked.slice(0,20)).candidates.map(candidate =>
+    (plan.brand || /零食/.test(plan.original)) && !isSnackRetailStore(candidate)
+      ? {...candidate,auto_confirm:false,requires_review:true,status:"标签待核验"}
+      : candidate);
 }

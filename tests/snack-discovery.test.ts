@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { discoverBrandStores, searchStoreCandidates, type AmapSearch } from "../server/store-search.js";
 import { isSnackRetailStore } from "../server/snack-retail.js";
+import { classifyResolutionCandidates } from "../server/store-resolution.js";
 import { searchPois } from "../server/services.js";
 
 test("高德将有零食标签的门店归入通用生活服务时仍保留，缺标签或明确餐饮仍排除", () => {
@@ -68,9 +69,13 @@ test("发现结果保留高德商业标签供入库和历史筛选再次核验",
   assert.equal(isSnackRetailStore(result.stores[0]),true);
 });
 
-test("单店关键词搜索同样不能仅凭好想来名称放行无标签结果",async()=>{
+test("单店关键词搜索保留疑似目标品牌并要求人工确认",async()=>{
   const amap:AmapSearch=async()=>({pois:[{id:"NO_TAG",name:"好想来零食",location:"114.3,30.5",type:"购物服务"}],tips:[]});
-  assert.deepEqual(await searchStoreCandidates(amap,"好想来零食"),[]);
+  const result=await searchStoreCandidates(amap,"好想来零食");
+  assert.equal(result[0]?.id,"NO_TAG");
+  assert.equal(result[0]?.auto_confirm,false);
+  assert.match(result[0]?.warnings.join(";"),/核验/);
+  assert.equal(classifyResolutionCandidates(result).autoConfirm,false);
 });
 
 test("竞品搜索也强制核验高德零食标签",async(context)=>{
