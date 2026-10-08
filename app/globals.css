@@ -39,3 +39,48 @@ small{font-size:12px!important;line-height:1.55}.why,.legend,.map-note,.disclaim
 @media(max-width:1100px){.library-filters{grid-template-columns:repeat(2,1fr)}.library-export{grid-template-columns:1fr}.library-query-grid{grid-template-columns:1fr}.city-picker,.brand-picker{grid-column:auto}}
 @media(max-width:900px){.brand-library-tabs{overflow:auto}.library-filters{grid-template-columns:1fr 1fr}.library-multi-filters>label{grid-template-columns:1fr}.library-selection-bar,.library-query-actions,.analysis-estimate{align-items:flex-start;flex-direction:column}.library-selection-bar span{margin-left:0}.condition-list>div{grid-template-columns:1fr 1fr}.library-export-actions{width:100%}.library-export-actions button{width:100%}}
 .pending-brands{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:12px;padding:10px 12px;border:1px solid #e6c989;background:#fff9e9;border-radius:9px;font-size:12px}.pending-brands button{border:1px solid #d3b56e;background:#fff;color:#80591c;border-radius:7px;padding:6px 9px;cursor:pointer}.reverse-result-head{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:12px}.reverse-result-head h3{margin-bottom:4px}@media(max-width:900px){.reverse-result-head{align-items:flex-start;flex-direction:column}}
+
+
+
+/* Store source metadata */
+.amap-rating{color:#08745b;font-weight:600}
+.library-status-help{margin:12px 0;color:#536776;font-size:13px;line-height:1.7}
+.library-status-help summary{cursor:pointer;color:#08745b}
+.library-status-help p{margin:6px 0}
+/* Give primary store search inputs priority over regional refinements. */
+.form-grid.store-search-form{grid-template-columns:repeat(2,minmax(0,1fr))}
+.store-search-form label{min-width:0}
+.store-search-regions{grid-column:1/-1;display:grid;grid-template-columns:repeat(3,minmax(0,180px)) minmax(140px,1fr);gap:14px;align-items:end}
+.store-search-regions>.primary{justify-self:end;min-width:140px}
+@media(max-width:640px){
+  .form-grid.store-search-form{grid-template-columns:minmax(0,1fr)}
+  .store-search-regions{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .store-search-regions>.primary{grid-column:1/-1;justify-self:stretch}
+  .search-panel .smart-search-note{flex-wrap:wrap}
+}
+@media(max-width:900px){
+  .shell{grid-template-columns:minmax(0,1fr)}
+  .sidebar{min-width:0}
+  .sidebar nav button{flex:0 0 auto;white-space:nowrap}
+}
+/* Consistent shortcuts for selectable groups throughout the application. */
+.selection-shortcuts{display:inline-flex;align-items:center;gap:6px;flex-shrink:0;white-space:nowrap}
+.selection-shortcuts>button{border:1px solid #bfd7ce;background:#fff;color:var(--green);border-radius:6px;padding:4px 10px;font:inherit;font-size:12px;font-weight:600;cursor:pointer;line-height:1.5}
+.selection-shortcuts>button:hover:not(:disabled){background:var(--mint);border-color:#78ad9e}
+.selection-shortcuts>button:disabled{opacity:.45;cursor:not-allowed}
+.selection-shortcuts>button:focus-visible{outline:2px solid var(--green);outline-offset:2px}
+.selection-toolbar,.selection-heading{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.selection-toolbar{margin:0 0 12px}
+.selection-toolbar small,.selection-note{font-size:12px;color:var(--muted);line-height:1.6}
+.selection-note{display:block;margin:5px 0 10px}
+.library-export-fields{min-width:0}
+.library-query-grid>.city-picker{font-size:12px;font-weight:700;color:#52605d}
+.city-picker>.selection-heading{margin-top:0;overflow:visible;max-height:none}
+.export-field-groups h3{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.export-tools{grid-template-columns:minmax(200px,1fr) auto auto auto auto}
+@media(max-width:900px){.export-tools{grid-template-columns:1fr}.selection-toolbar{align-items:flex-start}}
+.store-contact{display:flex;flex-wrap:wrap;align-items:center;gap:6px 16px;margin:7px 0;color:#405866;font-size:13px;line-height:1.6;overflow-wrap:anywhere}
+.store-contact a{color:#08745b;text-decoration:underline;text-underline-offset:3px;white-space:nowrap}
+.store-contact a:hover{color:#04513f}
+.store-contact a:focus-visible{outline:2px solid #08745b;outline-offset:3px;border-radius:2px}
+td .store-contact{align-items:flex-start;flex-direction:column;gap:3px;font-size:12px}

@@ -4,7 +4,7 @@ import test from "node:test";
 import { buildStoreSearchPlan, deriveStoreSearchInput, discoverBrandStores, scoreStoreCandidate, searchStoreCandidates, type AmapSearch } from "../server/store-search.js";
 
 const target="零食很忙湖北武汉江汉远洋万和四季店";
-const storePoi={id:"B001",name:"零食很忙(远洋万和四季店)",address:"常青街道远洋万和四季三栋底商7号",pname:"湖北省",cityname:"武汉市",adname:"江汉区",location:"114.250000,30.620000",type:"购物服务",typecode:"060200"};
+const storePoi={id:"B001",name:"零食很忙(远洋万和四季店)",address:"常青街道远洋万和四季三栋底商7号",pname:"湖北省",cityname:"武汉市",adname:"江汉区",location:"114.250000,30.620000",type:"购物服务;零食店",typecode:"060200"};
 
 test("从完整内部名称识别武汉行政区和核心店名",()=>{
   const plan=buildStoreSearchPlan(target);
@@ -61,9 +61,9 @@ test("门店搜索请求并保留高德现场照片",async()=>{
   assert.ok(calls.some(params=>String(params.show_fields).includes("photos")));
 });
 
-test("单店结果页提供地图标签全选、取消全选和现场照片页签",()=>{
+test("单店结果页提供地图标签全选、清空和现场照片页签",()=>{
   const source=fs.readFileSync(new URL("../app/page.tsx",import.meta.url),"utf8");
-  for(const text of ["全选","取消全选","现场照片","高德暂无该门店的现场照片"])assert.match(source,new RegExp(text));
+  for(const text of ["全选","清空","现场照片","高德暂无该门店的现场照片"])assert.match(source,new RegExp(text));
 });
 
 test("单店智能搜索允许只填写详细地址",()=>{
@@ -77,6 +77,7 @@ test("文本搜索无结果时使用高德输入提示召回精确门店",async(
   const calls:string[]=[];
   const amap:AmapSearch=async(path,params)=>{
     calls.push(`${path}|${params.keywords}`);
+    if(path==="/v5/place/detail")return {status:"1",pois:[{id:"B0MRFUTGKW",type:"购物服务;零食店"}]};
     if(path==="/v3/assistant/inputtips")return {status:"1",tips:[{
       id:"B0MRFUTGKW",name:"零食很忙(湖北荆州张沟社区店)",address:"张沟悦府",
       district:"湖北省荆州市沙市区",adcode:"421002",location:"112.276715,30.321274",
@@ -93,7 +94,7 @@ test("文本搜索无结果时使用高德输入提示召回精确门店",async(
 });
 
 test("输入提示返回的门店名增加道路信息时仍可自动确认",async()=>{
-  const amap:AmapSearch=async(path)=>path==="/v3/assistant/inputtips"?{status:"1",tips:[{
+  const amap:AmapSearch=async(path,params)=>path==="/v5/place/detail"?{pois:[{id:String(params.id),type:"购物服务;零食店"}]}:path==="/v3/assistant/inputtips"?{status:"1",tips:[{
     id:"B0MRG7N1NH",name:"零食很忙(湖北仙桃汉江路白露苑店)",address:"白露苑东门南160米",
     district:"湖北省仙桃市",adcode:"429004",location:"113.432514,30.357683",
   }]}:{status:"1",pois:[]};
@@ -110,7 +111,7 @@ test("任务38的四个历史失败门店均能跳过无坐标提示并匹配真
     {input:"零食很忙(湖北天门天华金瑞府店)",id:"B0M1BYWJL5",name:"零食很忙(湖北天门天华金瑞府店)",address:"天华·金瑞府",district:"湖北省天门市",location:"113.183884,30.660186"},
   ];
   for(const fixture of fixtures){
-    const amap:AmapSearch=async(path)=>path==="/v3/assistant/inputtips"?{status:"1",tips:[
+    const amap:AmapSearch=async(path,params)=>path==="/v5/place/detail"?{pois:[{id:String(params.id),type:"购物服务;零食店"}]}:path==="/v3/assistant/inputtips"?{status:"1",tips:[
       {id:[],name:fixture.input,address:[],district:[],location:[]},fixture,
     ]}:{status:"1",pois:[]};
     const candidates=await searchStoreCandidates(amap,fixture.input);
@@ -124,9 +125,9 @@ test("好想来品牌变体和道路同义词可以形成高置信度匹配",()=
   const candidate=scoreStoreCandidate({
     id:"YC001",name:"好想来零食乐园(盐城响水县陈家港镇店)",
     address:"陈家港镇黄海大街46号",cityname:"盐城市",adname:"响水县",
-    location:"119.81429,34.37576",type:"购物服务",typecode:"060200",
+    location:"119.81429,34.37576",type:"购物服务;零食店",typecode:"060200",
   },plan);
-  assert.equal(plan.brand,"好想来零食");
+  assert.equal(plan.brand,"好想来");
   assert.ok(candidate);
   assert.equal(candidate.auto_confirm,true);
   assert.ok(candidate.score>=75);
@@ -138,12 +139,12 @@ test("乡镇名称一致时优先于仅品牌和区县相同的候选",()=>{
   const exactTown=scoreStoreCandidate({
     id:"NT001",name:"好想来零食乐园(人民路店)",
     address:"雅周镇周村一组好想来品牌零食",cityname:"南通市",adname:"海安市",
-    location:"120.332715,32.39518",type:"购物服务",typecode:"060200",
+    location:"120.332715,32.39518",type:"购物服务;零食店",typecode:"060200",
   },plan);
   const otherTown=scoreStoreCandidate({
     id:"NT002",name:"好想来零食乐园(曲塘店)",
     address:"曲塘镇中心街",cityname:"南通市",adname:"海安市",
-    location:"120.400000,32.500000",type:"购物服务",typecode:"060200",
+    location:"120.400000,32.500000",type:"购物服务;零食店",typecode:"060200",
   },plan);
   assert.ok(exactTown&&otherTown);
   assert.equal(exactTown.auto_confirm,true);
@@ -156,7 +157,7 @@ test("门店名称缺失时会使用详细地址搜索而不是发送空关键�
   const address="湖北省黄冈市蕲春县管窑镇 寒婆岭村南征街道131号零食很忙管窑镇店";
   const amap:AmapSearch=async(path,params)=>{
     calls.push(`${path}|${String(params.keywords||"")}`);
-    return path==="/v5/place/text"?{status:"1",pois:[{id:"HG001",name:"零食很忙(管窑镇店)",address:"南征街道131号",pname:"湖北省",cityname:"黄冈市",adname:"蕲春县",location:"115.200000,30.200000"}]}:{status:"1",tips:[]};
+    return path==="/v5/place/text"?{status:"1",pois:[{type:"购物服务;零食店",id:"HG001",name:"零食很忙(管窑镇店)",address:"南征街道131号",pname:"湖北省",cityname:"黄冈市",adname:"蕲春县",location:"115.200000,30.200000"}]}:{status:"1",tips:[]};
   };
   const candidates=await searchStoreCandidates(amap,"","黄冈","",address);
   assert.equal(candidates[0]?.id,"HG001");
@@ -165,7 +166,7 @@ test("门店名称缺失时会使用详细地址搜索而不是发送空关键�
 
 test("名称存在时仍会把详细地址作为独立召回路径且单行不超过六次请求",async()=>{
   const calls:string[]=[],address="湖北省武汉市洪山区珞喻路88号";
-  const amap:AmapSearch=async(path,params)=>{calls.push(`${path}|${String(params.keywords||"")}`);return path==="/v5/place/text"&&params.keywords===address?{status:"1",pois:[{id:"ADDR1",name:"零食很忙(光谷店)",address:"珞喻路88号",cityname:"武汉市",adname:"洪山区",location:"114.4,30.5"}]}:{status:"1",pois:[],tips:[]}};
+  const amap:AmapSearch=async(path,params)=>{calls.push(`${path}|${String(params.keywords||"")}`);return path==="/v5/place/text"&&params.keywords===address?{status:"1",pois:[{type:"购物服务;零食店",id:"ADDR1",name:"零食很忙(光谷店)",address:"珞喻路88号",cityname:"武汉市",adname:"洪山区",location:"114.4,30.5"}]}:{status:"1",pois:[],tips:[]}};
   const candidates=await searchStoreCandidates(amap,"零食很忙光谷店","武汉市","洪山区",address);
   assert.equal(candidates[0]?.id,"ADDR1");
   assert.ok(calls.some(call=>call.endsWith(`|${address}`)));
@@ -183,7 +184,7 @@ test("全量品牌查询会按行政区分页并跨页去重",async()=>{
   const makePoi=(index:number)=>({
     id:`WH${String(index).padStart(3,"0")}`,name:`零食很忙(测试${index}店)`,address:`测试路${index}号`,
     pname:"湖北省",cityname:"武汉市",adname:"洪山区",location:`114.${300000+index},30.${500000+index}`,
-    type:"购物服务",typecode:"060200",
+    type:"购物服务;零食店",typecode:"060200",
   });
   const firstPage=Array.from({length:25},(_,index)=>makePoi(index+1));
   const amap:AmapSearch=async(path,params)=>{
@@ -207,7 +208,7 @@ test("全量品牌查询达到请求保护上限时明确标记结果可能不�
     ?{status:"1",districts:[{name:"武汉市",districts:[{name:"洪山区",adcode:"420111"},{name:"江汉区",adcode:"420103"}]}]}
     :{status:"1",pois:Array.from({length:25},(_,index)=>({
       id:`LIMIT${index}`,name:`零食很忙(限额测试${index}店)`,address:"测试路",
-      cityname:"武汉市",adname:"洪山区",location:`114.${index+100000},30.${index+100000}`,
+      type:"购物服务;零食店",cityname:"武汉市",adname:"洪山区",location:`114.${index+100000},30.${index+100000}`,
     }))};
   const result=await discoverBrandStores(amap,"零食很忙","武汉市","",{maxPagesPerRegion:10,maxRequests:2});
   assert.equal(result.requests,2);
@@ -218,7 +219,7 @@ test("全量品牌查询达到请求保护上限时明确标记结果可能不�
 
 test("品牌门店库维护的别名会参与查询并归入标准品牌",async()=>{
   const calls:string[]=[];
-  const amap:AmapSearch=async(path,params)=>{calls.push(String(params.keywords||""));return path==="/v5/place/text"&&params.keywords==="测试零食别名"?{status:"1",pois:[{id:"ALIAS1",name:"测试零食别名(中心店)",address:"测试路1号",cityname:"武汉市",adname:"洪山区",location:"114.3,30.5"}]}:{status:"1",districts:[],pois:[]}};
+  const amap:AmapSearch=async(path,params)=>{calls.push(String(params.keywords||""));return path==="/v5/place/text"&&params.keywords==="测试零食别名"?{status:"1",pois:[{id:"ALIAS1",name:"测试零食别名(中心店)",address:"测试路1号",type:"购物服务;零食店",cityname:"武汉市",adname:"洪山区",location:"114.3,30.5"}]}:{status:"1",districts:[],pois:[]}};
   const result=await discoverBrandStores(amap,"测试零食标准名","武汉市","洪山区",{aliases:["测试零食别名"],maxPagesPerRegion:2,maxRequests:10});
   assert.ok(calls.includes("测试零食别名"));
   assert.equal(result.stores.length,1);

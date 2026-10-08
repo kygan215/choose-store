@@ -1,3 +1,5 @@
+import { isSnackRetailStore } from "./snack-retail.js";
+import { DEFAULT_SNACK_BRANDS } from "./snack-brands.js";
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { callDeepSeek, type AggregateStore } from "../app/api/deepseek.js";
 import { scoreBand, scoreEnvironmentProxies, scorePoiEnvironment } from "../app/scoring.js";
@@ -10,12 +12,9 @@ export type Row=Record<string,any>;
 export type Poi={id:string;name:string;category:string;type:string;typecode:string;address:string;distance:number;location:[number,number];distance_bucket:string;brand?:string;competitor_relation?:"同品牌竞品"|"异品牌竞品";cost?:number;rating?:number};
 export const POI_CATEGORY_TYPES:Record<string,string>={"住宅小区":"120302","幼儿园":"141204","小学":"141203","中学":"141202","购物中心":"060101","超市":"060400","便利店":"060200","餐饮服务":"050000","咖啡茶饮":"050500|050600","酒店":"100000","医院":"090100","药店":"090601","公园":"110101","地铁站":"150500","公交站":"150700"};
 export const PROFILE_CATEGORIES=["住宅小区","幼儿园","小学","中学","购物中心","超市","便利店","餐饮服务","咖啡茶饮","酒店","药店","公园","地铁站","公交站","竞品门店"];
-const SNACK_BRANDS=[
-  ["零食很忙",/零食很忙/],["零食有鸣",/零食有鸣/],["赵一鸣零食",/赵一鸣/],["好想来零食",/好[想像]来/],
-  ["爱零食",/爱零食/],["老婆大人",/老婆大人/],["来优品",/来优品/],["戴永红",/戴永红/],["糖巢",/糖巢/],["恰货铺子",/恰货铺子/],
-] as const;
-export function inferSnackBrand(value:unknown){const name=clean(value).replace(/\s+/g,"");return SNACK_BRANDS.find(([,pattern])=>pattern.test(name))?.[0]||"其他折扣零食"}
-function looksLikeSnackCompetitor(value:unknown){const name=clean(value);return SNACK_BRANDS.some(([,pattern])=>pattern.test(name))||/(零食|量贩食品|食品折扣|折扣食品|休闲食品)/.test(name)}
+const SNACK_BRANDS=[...DEFAULT_SNACK_BRANDS,{name:"恰货铺子",aliases:["恰货铺子"]}];
+export function inferSnackBrand(value:unknown){const name=clean(value).replace(/\s+/g,"");return SNACK_BRANDS.find(brand=>brand.aliases.some(alias=>name.includes(alias)))?.name||"其他折扣零食"}
+function looksLikeSnackCompetitor(value:unknown){const name=clean(value);return SNACK_BRANDS.some(brand=>brand.aliases.some(alias=>name.includes(alias)))||/(零食|量贩食品|食品折扣|折扣食品|休闲食品)/.test(name)}
 let lastAmap=0;
 const amapCache=new Map<string,{expires:number;data:Row}>();
 export const clean=(value:unknown)=>String(value??"").trim();
@@ -70,7 +69,7 @@ export async function searchPois(store:Row,categories:string[],radii:number[],be
       if(beforeRequest)await beforeRequest({category,page,radius:maxRadius});const data=await amap("/v5/place/around",params),rows=Array.isArray(data.pois)?data.pois as Row[]:[];
       for(const raw of rows){
         const location=parseLocation(raw.location),name=clean(raw.name),id=clean(raw.id);if(!location)continue;
-        const distance=Number(raw.distance)||haversine(origin,location);if(category==="竞品门店"&&(!looksLikeSnackCompetitor(name)||id===targetPoiId||(distance<=20&&name===clean(store.standard_name))))continue;
+        const distance=Number(raw.distance)||haversine(origin,location);if(category==="竞品门店"&&(!looksLikeSnackCompetitor(name)||!isSnackRetailStore(raw)||id===targetPoiId||(distance<=20&&name===clean(store.standard_name))))continue;
         const business=(raw.business&&typeof raw.business==="object"?raw.business:{}) as Row,brand=category==="竞品门店"?inferSnackBrand(name):undefined;
         items.push({id,name,category,type:clean(raw.type),typecode:clean(raw.typecode),address:clean(raw.address),distance,location,distance_bucket:distanceBucket(distance,radii),brand,competitor_relation:category==="竞品门店"?(brand===targetBrand?"同品牌竞品":"异品牌竞品"):undefined,cost:Number(business.cost)>0?Number(business.cost):undefined,rating:Number(business.rating)>0?Number(business.rating):undefined});
       }

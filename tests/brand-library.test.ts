@@ -7,11 +7,11 @@ import type { Poi, Row } from "../server/services.js";
 const poi=(name:string,category:string,distance:number,id=name):Poi=>({id,name,category,type:"",typecode:"",address:"",distance,location:[114,30],distance_bucket:"≤500米"});
 
 async function runCachedDiscoveryScenario(cities:string[],stores:Array<{brand_name:string;province:string;city:string}>,provinceCities:string[]=[]){
-  const job:Row={id:17,tenant_id:1,created_by:2,province:"湖北省",cities_json:cities,brands_json:["良品铺子"],force_refresh:false,status:"等待执行",control:"run",api_calls:0,processed_units:0,cached_units:0,found_stores:0};
-  const scopedCount=(values:unknown[])=>stores.filter(store=>store.brand_name==="良品铺子"&&store.province==="湖北省"&&(!Array.isArray(values[3])||(values[3] as string[]).includes(store.city))).length;
+  const job:Row={id:17,tenant_id:1,created_by:2,province:"湖北省",cities_json:cities,brands_json:["来伊份"],force_refresh:false,status:"等待执行",control:"run",api_calls:0,processed_units:0,cached_units:0,found_stores:0};
+  const scopedCount=(values:unknown[])=>stores.filter(store=>store.brand_name==="来伊份"&&store.province==="湖北省"&&(!Array.isArray(values[3])||(values[3] as string[]).includes(store.city))).length;
   const fakeQuery=async(_text:string,values:unknown[]=[])=>{
     if(_text.startsWith("SELECT * FROM brand_discovery_jobs"))return {rows:[job],rowCount:1};
-    if(_text.startsWith("SELECT standard_name"))return {rows:[{standard_name:"良品铺子",aliases_json:["良品铺子"]}],rowCount:1};
+    if(_text.startsWith("SELECT standard_name"))return {rows:[{standard_name:"来伊份",aliases_json:["来伊份"]}],rowCount:1};
     if(_text.startsWith("SELECT * FROM brand_region_cache"))return {rows:[{complete:true}],rowCount:1};
     if(_text.startsWith("SELECT COUNT(*) count FROM brand_stores"))return {rows:[{count:scopedCount(values)}],rowCount:1};
     if(_text.includes("processed_units=processed_units+1")){job.processed_units=Number(job.processed_units)+1;job.cached_units=Number(job.cached_units)+1;job.found_stores=scopedCount(values)}
@@ -29,26 +29,26 @@ async function runCachedDiscoveryScenario(cities:string[],stores:Array<{brand_na
 
 test("单城市品牌查询只报告该城市范围内的门店数",async()=>{
   const result=await runCachedDiscoveryScenario(["武汉市"],[
-    {brand_name:"良品铺子",province:"湖北省",city:"武汉市"},
-    {brand_name:"良品铺子",province:"湖北省",city:"宜昌市"},
+    {brand_name:"来伊份",province:"湖北省",city:"武汉市"},
+    {brand_name:"来伊份",province:"湖北省",city:"宜昌市"},
   ]);
   assert.equal(result.found_stores,1);
 });
 
 test("多城市品牌查询报告所选城市范围内的门店总数",async()=>{
   const result=await runCachedDiscoveryScenario(["武汉市","宜昌市"],[
-    {brand_name:"良品铺子",province:"湖北省",city:"武汉市"},
-    {brand_name:"良品铺子",province:"湖北省",city:"宜昌市"},
-    {brand_name:"良品铺子",province:"湖北省",city:"襄阳市"},
+    {brand_name:"来伊份",province:"湖北省",city:"武汉市"},
+    {brand_name:"来伊份",province:"湖北省",city:"宜昌市"},
+    {brand_name:"来伊份",province:"湖北省",city:"襄阳市"},
   ]);
   assert.equal(result.found_stores,2);
 });
 
 test("全省品牌查询展开全部城市并报告全省门店总数",async()=>{
   const result=await runCachedDiscoveryScenario([],[
-    {brand_name:"良品铺子",province:"湖北省",city:"武汉市"},
-    {brand_name:"良品铺子",province:"湖北省",city:"宜昌市"},
-    {brand_name:"良品铺子",province:"湖南省",city:"长沙市"},
+    {brand_name:"来伊份",province:"湖北省",city:"武汉市"},
+    {brand_name:"来伊份",province:"湖北省",city:"宜昌市"},
+    {brand_name:"来伊份",province:"湖南省",city:"长沙市"},
   ],["武汉市","宜昌市"]);
   assert.deepEqual(result.cities,["武汉市","宜昌市"]);
   assert.equal(result.found_stores,2);
@@ -56,27 +56,27 @@ test("全省品牌查询展开全部城市并报告全省门店总数",async()=>
 
 test("共享门店筛选支持多品牌、多省份和多城市的组合",()=>{
   const result=storeFilterSql(9,{
-    brands:["零食很忙","赵一鸣零食","好想来零食"],
+    brands:["零食很忙","赵一鸣零食","好想来"],
     provinces:["湖北省","湖南省"],
     cities:["武汉市","襄阳市","长沙市"],
   });
   assert.match(result.where,/bs\.brand_name=ANY\(\$2::text\[\]\)/);
   assert.match(result.where,/bs\.province=ANY\(\$3::text\[\]\)/);
   assert.match(result.where,/bs\.city=ANY\(\$4::text\[\]\)/);
-  assert.deepEqual(result.values,[9,["零食很忙","赵一鸣零食","好想来零食"],["湖北省","湖南省"],["武汉市","襄阳市","长沙市"]]);
+  assert.deepEqual(result.values,[9,["零食很忙","赵一鸣零食","好想来"],["湖北省","湖南省"],["武汉市","襄阳市","长沙市"]]);
 });
 
-test("品牌门店库取消全国入口并提供完整省级入口",()=>{
+test("品牌门店库提供全国入口和完整省级入口",()=>{
   assert.equal(PROVINCES.includes("湖北省"),true);
-  assert.equal(PROVINCES.includes("全国"),false);
+  assert.equal(PROVINCES.includes("全国"),true);
   assert.ok(PROVINCES.length>=31);
 });
 
 test("首批零食系统品牌库包含需求确认的主要品牌",()=>{
   const names=DEFAULT_BRANDS.map(item=>item.name);
-  for(const expected of ["零食很忙","零食有鸣","赵一鸣零食","好想来零食","爱零食","来优品","戴永红","糖巢","老婆大人","陆小馋","吖嘀吖嘀","来伊份"])assert.ok(names.includes(expected),expected);
-  assert.equal(names.includes("良品铺子"),false);
-  assert.ok(DEFAULT_BRANDS.find(item=>item.name==="好想来零食")?.aliases.includes("好像来"));
+  for(const expected of ["零食很忙","零食有鸣","赵一鸣零食","好想来","爱零食","来优品","戴永红","糖巢","老婆大人","陆小馋","吖嘀吖嘀","来伊份"])assert.ok(names.includes(expected),expected);
+  assert.equal(names.includes("好想来零食"),false);
+  assert.ok(DEFAULT_BRANDS.find(item=>item.name==="好想来")?.aliases.includes("好像来"));
 });
 
 test("学校有效数量会合并同一学校的入口而保留独立校区",()=>{

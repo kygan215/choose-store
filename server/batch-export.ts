@@ -1,8 +1,11 @@
+import { matchedAmapTel } from "../app/amap-contact.js";
 import ExcelJS from "exceljs";
 import type { Poi, Row } from "./services.js";
+import { matchedAmapRating } from "../app/amap-rating.js";
 
 export const EXPORT_BASE_FIELDS = [
   {id:"province",label:"省份",group:"门店信息"},{id:"city",label:"城市",group:"门店信息"},{id:"district",label:"区县",group:"门店信息"},
+  {id:"rating",label:"高德评分",group:"门店信息"},{id:"tel",label:"门店电话",group:"门店信息"},
   {id:"longitude",label:"经度",group:"定位信息"},{id:"latitude",label:"纬度",group:"定位信息"},{id:"amap_poi_id",label:"高德 POI ID",group:"定位信息"},
   {id:"user_code",label:"门店编号",group:"门店信息"},{id:"brand",label:"品牌",group:"门店信息"},{id:"status",label:"分析状态",group:"分析信息"},
   {id:"match_score",label:"门店匹配分",group:"分析信息"},{id:"poi_total",label:"POI 总数量",group:"分析信息"},{id:"analysis_time",label:"分析完成时间",group:"分析信息"},
@@ -51,6 +54,7 @@ function optionalValue(id:string,row:Row,ai:Row){
   const analysis=(row.analysis_json||{}) as Row,audience=(analysis.audience_profile||{}) as Row,groups=Array.isArray(audience.primary_groups)?audience.primary_groups as Row[]:[],aiResult=(ai.result_json||{}) as Row,recognition=recognitionValues(analysis),proxies=proxyValues(analysis),nearest=(proxies.competition.nearest||{}) as Row;
   const aiError=String(aiResult.summary||"");if(id.startsWith("ai_")&&/^(AI生成失败|未生成：)/.test(aiError))return text(aiError);
   const values:Record<string,unknown>={
+    rating:matchedAmapRating(row.amap_poi_id,row.match_candidates_json),tel:matchedAmapTel(row.amap_poi_id,row.match_candidates_json),
     province:row.province,city:row.city,district:row.district,longitude:row.longitude==null?"":Number(row.longitude),latitude:row.latitude==null?"":Number(row.latitude),amap_poi_id:row.amap_poi_id,
     user_code:row.user_code,brand:row.brand,status:row.status,match_score:row.match_score==null?"":Number(row.match_score),poi_total:Array.isArray(row.pois_json)?row.pois_json.length:0,
     analysis_time:row.updated_at?new Date(row.updated_at):"",business_district_type:analysis.business_district_type?.type,business_area:analysis.business_area?.name,business_level:analysis.level?.level,

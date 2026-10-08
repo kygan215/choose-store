@@ -50,7 +50,7 @@ test("住宅活跃度、消费环境和竞品压力按半径形成可比较分�
 });
 
 test("常见折扣零食品牌可以标准化识别",()=>{
-  assert.equal(inferSnackBrand("好像来零食盐城黄海大街店"),"好想来零食");
+  assert.equal(inferSnackBrand("好像来零食盐城黄海大街店"),"好想来");
   assert.equal(inferSnackBrand("赵一鸣零食雅周镇店"),"赵一鸣零食");
 });
 

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import test from "node:test";
 import ExcelJS from "exceljs";
-import { buildBatchExportWorkbook, countPois, poiColumnLabel, sanitizeExcelText } from "../server/batch-export.js";
+import { buildBatchExportWorkbook, countPois, EXPORT_BASE_FIELDS, poiColumnLabel, sanitizeExcelText } from "../server/batch-export.js";
 import type { Poi, Row } from "../server/services.js";
 
 const pois:Poi[]=[
@@ -11,6 +11,40 @@ const pois:Poi[]=[
   {id:"3",name:"小学A",category:"小学",type:"",typecode:"",address:"",distance:480,location:[114.32,30.52],distance_bucket:"≤500米"},
   {id:"4",name:"中学A",category:"中学",type:"科教文化服务;学校;中学",typecode:"141202",address:"",distance:450,location:[114.32,30.52],distance_bucket:"≤500米"},
 ];
+
+test("电话作为可选字段导出为文本，保留区号并使用已确认门店的电话", async () => {
+  assert.ok(EXPORT_BASE_FIELDS.some(field => field.id === "tel" && field.label === "门店电话"));
+  const rows:Row[] = [
+    {id:1,input_name:"电话门店",amap_poi_id:"chosen",match_candidates_json:[{id:"other",tel:"4000107777"},{id:"chosen",tel:"025-12345678；025-87654321"}]},
+    {id:2,input_name:"历史门店",amap_poi_id:"missing",match_candidates_json:[]},
+  ];
+  for (const fields of [["tel"], []]) {
+    const buffer = await buildBatchExportWorkbook(rows, [], {jobIds:[1],storeIds:[1,2],fields,radii:[],categories:[],includePoiDetails:false,includeFailures:false,includeNotes:false}, {userEmail:"tester@example.com",jobNames:["电话导出测试"]});
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(buffer as unknown as ExcelJS.Buffer);
+    const sheet = workbook.getWorksheet("门店汇总")!;
+    assert.deepEqual((sheet.getRow(1).values as unknown[]).slice(1), ["门店名称","门店地址",...(fields.length ? ["门店电话"] : [])]);
+    if (fields.length) {
+      assert.equal(sheet.getCell("C2").value, "025-12345678；025-87654321");
+      assert.ok([null, ""].includes(sheet.getCell("C3").value as null|string));
+    }
+  }
+});
+
+test("高德评分可按字段勾选导出，使用已确认门店的数值评分且缺失留空",async()=>{
+  assert.ok(EXPORT_BASE_FIELDS.some(field=>field.id==="rating"&&field.label==="高德评分"&&field.group==="门店信息"));
+  const rows:Row[]=[
+    {id:1,input_name:"已评分门店",amap_poi_id:"chosen",match_score:96,match_candidates_json:[{id:"other",rating:4.8},{id:"chosen",rating:3.9}]},
+    {id:2,input_name:"暂无评分门店",amap_poi_id:"missing",match_score:99,match_candidates_json:[{id:"missing",rating:null}]},
+  ];
+  for(const fields of [["rating"],[]]){
+    const buffer=await buildBatchExportWorkbook(rows,[],{jobIds:[1],storeIds:[1,2],fields,radii:[],categories:[],includePoiDetails:false,includeFailures:false,includeNotes:false},{userEmail:"tester@example.com",jobNames:["评分导出测试"]});
+    const workbook=new ExcelJS.Workbook();await workbook.xlsx.load(buffer as unknown as ExcelJS.Buffer);
+    const sheet=workbook.getWorksheet("门店汇总")!;
+    assert.deepEqual((sheet.getRow(1).values as unknown[]).slice(1),["门店名称","门店地址",...(fields.length?["高德评分"]:[])]);
+    if(fields.length){assert.equal(sheet.getCell("C2").value,3.9);assert.ok([null,""].includes(sheet.getCell("C3").value as null|string))}
+  }
+});
 
 test("圈层分类字段名称和累计数量口径正确",()=>{
   assert.equal(poiColumnLabel(500,"住宅小区"),"500米住宅小区数量");

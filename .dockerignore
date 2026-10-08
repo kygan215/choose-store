@@ -13,3 +13,7 @@ data
 outputs
 backups
 *.log
+.tmp
+projects
+.pptmaster*
+*.tar.gz
