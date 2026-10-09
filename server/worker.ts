@@ -1,3 +1,4 @@
+import { DASHBOARD_JOB, DASHBOARD_SCHEDULE, refreshAllBrandDashboards } from "./brand-dashboard.js";
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { Worker, type Job } from "bullmq";
 import { query } from "./db.js";
@@ -36,6 +37,7 @@ async function analyzeBatch(jobId:number,tenantId:number,userId:number){
 }
 
 async function processJob(job:Job){
+  if(job.name===DASHBOARD_JOB)return refreshAllBrandDashboards();
   let tenantId=Number(job.data.tenantId||0),userId=Number(job.data.userId||0);
   if(!userId&&job.data.jobId){const legacy=(await query<Row>("SELECT tenant_id,created_by FROM jobs WHERE id=$1",[job.data.jobId])).rows[0];tenantId=Number(legacy?.tenant_id||tenantId);userId=Number(legacy?.created_by||0)}
   if(!userId&&job.data.storeId){const legacy=(await query<Row>("SELECT tenant_id,created_by FROM stores WHERE id=$1",[job.data.storeId])).rows[0];tenantId=Number(legacy?.tenant_id||tenantId);userId=Number(legacy?.created_by||0)}
@@ -52,4 +54,7 @@ async function processJob(job:Job){
 }
 
 const worker=new Worker("store-analysis",processJob,{connection:redisConnection,concurrency:Math.max(1,Math.min(5,Number(process.env.WORKER_CONCURRENCY||3)))});worker.on("completed",job=>console.log(JSON.stringify({event:"job_completed",id:job.id,name:job.name})));worker.on("failed",(job,error)=>{console.error(JSON.stringify({event:"job_failed",id:job?.id,name:job?.name,error:error.message}));if(job?.name==="ai-export-batch"&&job.data?.exportId)void query("UPDATE ai_export_jobs SET status='failed',error_message=$1,current_store='',completed_at=NOW(),updated_at=NOW() WHERE id=$2",[error.message,job.data.exportId]);else if(job?.name==="brand-library-export"&&job.data?.exportId)void query("UPDATE brand_export_jobs SET status='failed',error_message=$1,completed_at=NOW(),updated_at=NOW() WHERE id=$2",[error.message,job.data.exportId]);else if(job?.name==="discover-brand-stores"&&job.data?.jobId)void query("UPDATE brand_discovery_jobs SET status='任务执行失败',control='idle',error_message=$1,current_region='',updated_at=NOW() WHERE id=$2",[error.message,job.data.jobId]);else if(job?.data?.jobId&&job.data?.tenantId&&job.data?.userId)void query("UPDATE jobs SET status='任务执行失败',control='idle',current_store='',updated_at=NOW() WHERE id=$1 AND tenant_id=$2 AND created_by=$3",[job.data.jobId,job.data.tenantId,job.data.userId])});console.log("Queue worker started");
+await taskQueue.upsertJobScheduler(DASHBOARD_JOB,DASHBOARD_SCHEDULE,{name:DASHBOARD_JOB,data:{},opts:{attempts:3,backoff:{type:"exponential",delay:30000}}});
+await taskQueue.add(DASHBOARD_JOB,{}, {jobId:"brand-dashboard-startup",removeOnComplete:true,removeOnFail:true});
+
 async function stop(){await worker.close();process.exit(0)}process.on("SIGTERM",stop);process.on("SIGINT",stop);

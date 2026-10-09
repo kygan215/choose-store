@@ -37,6 +37,7 @@ ENV NODE_ENV=production
 COPY --from=runtime-dependencies /app/node_modules ./node_modules
 COPY package.json package-lock.json tsconfig.json ./
 COPY server ./server
+COPY shared ./shared
 COPY app/api/deepseek.ts ./app/api/deepseek.ts
 COPY app/scoring.ts app/amap-rating.ts app/amap-contact.ts ./app/
 COPY tools/reconcile-snack-library.ts ./tools/reconcile-snack-library.ts
