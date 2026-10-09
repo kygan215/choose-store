@@ -36,8 +36,9 @@ test("蛋糕排除与待核验生成列匹配应用规则，更新后自动重�
   await client.query("UPDATE brand_stores SET amap_name='糖巢',poi_type='购物服务;专营店',typecode='061200',raw_json=$2 WHERE id=$1",[row.id,JSON.stringify({business:{keytag:"零食"}})]);
   assert.equal((await client.query("SELECT needs_review FROM brand_stores WHERE id=$1",[row.id])).rows[0].needs_review,false);
   await client.query("UPDATE brand_stores SET raw_json=$2 WHERE id=$1",[row.id,JSON.stringify({business:{keytag:"蛋糕店"}})]);
-  assert.equal((await client.query("SELECT library_visible FROM brand_stores WHERE id=$1",[row.id])).rows[0].library_visible,false);
-  const built=storeFilterSql(1,{review_status:"pending"});assert.equal(Number((await client.query(`SELECT count(*) count FROM brand_stores bs WHERE ${built.where}`,built.values)).rows[0].count),count);
+  const excluded=(await client.query("SELECT library_visible,name_decision FROM brand_stores WHERE id=$1",[row.id])).rows[0];
+  assert.equal(excluded.library_visible,false);assert.equal(excluded.name_decision,"排除");
+  const built=storeFilterSql(1,{review_status:"pending"});assert.equal(Number((await client.query(`SELECT count(*) count FROM brand_stores bs WHERE ${built.where}`,built.values)).rows[0].count),count-1);
   console.log(JSON.stringify({classification_cases:cases.length,pending:count,generated_fields:'matched',pagination:'passed'}));
  }finally{await client.query("ROLLBACK");client.release()}
 });

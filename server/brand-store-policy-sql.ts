@@ -1,4 +1,4 @@
-import { BRAND_IDENTITIES, brandNamePattern, CAKE_TAG, CONFLICT_TAG, POLICY_REASONS as R, RETAIL_TAG, SIMILAR_NAME, UNRELATED_NAME } from "../shared/brand-store-policy.js";
+import { BRAND_IDENTITIES, brandNamePattern, CAKE_TAG, CONFLICT_TAG, NON_TARGET_CATEGORY_TAG, POLICY_REASONS as R, RETAIL_TAG, SIMILAR_NAME, UNRELATED_NAME } from "../shared/brand-store-policy.js";
 import { snackRetailSql } from "./snack-retail.js";
 const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
 const known = `brand_name IN (${Object.keys(BRAND_IDENTITIES).map(q).join(",")})`;
@@ -8,15 +8,17 @@ LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
  WITH evidence AS (SELECT ailingshi_normalize(name) AS n,
  COALESCE(poi_type,'') || ';' || COALESCE(raw->>'tag','') || ';' || COALESCE(raw#>>'{business,tag}','') || ';' || COALESCE(raw#>>'{business,rectag}','') || ';' || COALESCE(raw#>>'{business,keytag}','') AS tags,
  regexp_replace(COALESCE(codes,''),'[[:space:]]','','g') AS c), flags AS (
- SELECT *, (tags ~ ${q(RETAIL_TAG)} OR c ~ '(^|[|;,])06[0-9]{4}([|;,]|$)') AS retail FROM evidence)
+ SELECT *, (tags ~ ${q(RETAIL_TAG)} OR c ~ '(^|[|;,])06[0-9]{4}([|;,]|$)') AS retail,
+ tags ~ '零食' AS snack_evidence FROM evidence)
  SELECT CASE
  WHEN btrim(COALESCE(poi_id,''))<>'' AND manual='exclude' THEN ${q(R.blacklist)}
  WHEN split_part(n,'(',1) ~ ${q(UNRELATED_NAME)} THEN ${q(R.unrelated)}
  WHEN brand='爱零食' AND manual<>'accept' AND n ~ ${q(SIMILAR_NAME)} THEN ${q(R.similar)}
- WHEN tags ~ ${q(CAKE_TAG)} AND NOT retail THEN ${q(R.cake)}
+ WHEN tags ~ ${q(CAKE_TAG)} AND NOT snack_evidence THEN ${q(R.cake)}
+ WHEN tags ~ ${q(NON_TARGET_CATEGORY_TAG)} AND NOT snack_evidence THEN ${q(R.category)}
  WHEN btrim(COALESCE(poi_id,''))='' THEN ${q(R.noId)}
  WHEN manual<>'accept' AND NOT (CASE brand ${Object.keys(BRAND_IDENTITIES).map(b => `WHEN ${q(b)} THEN n ~ ${q(brandNamePattern(b))}`).join("\n")} ELSE FALSE END) THEN ${q(R.name)}
- WHEN tags ~ ${q(`${CAKE_TAG}|${CONFLICT_TAG}`)} OR c ~ '(^|[|;,])(?!06[0-9]{4}([|;,]|$)|070000([|;,]|$))[0-9]{6}([|;,]|$)' THEN ${q(R.conflict)}
+ WHEN tags ~ ${q(`${CAKE_TAG}|${NON_TARGET_CATEGORY_TAG}|${CONFLICT_TAG}`)} OR c ~ '(^|[|;,])(?!06[0-9]{4}([|;,]|$)|070000([|;,]|$))[0-9]{6}([|;,]|$)' THEN ${q(R.conflict)}
  WHEN NOT retail THEN ${q(R.tags)}
  WHEN manual='accept' THEN ${q(R.manual)} ELSE ${q(R.accepted)} END FROM flags
 $$;
@@ -24,7 +26,7 @@ CREATE OR REPLACE FUNCTION brand_policy_decision(brand text, name text, poi_id t
 LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
  SELECT CASE brand_policy_reason(brand,name,poi_id,manual,poi_type,codes,raw)
  WHEN ${q(R.accepted)} THEN '接受' WHEN ${q(R.manual)} THEN '接受'
- ${[R.blacklist,R.unrelated,R.similar,R.cake].map(r=>`WHEN ${q(r)} THEN '排除'`).join(" ")}
+ ${[R.blacklist,R.unrelated,R.similar,R.cake,R.category].map(r=>`WHEN ${q(r)} THEN '排除'`).join(" ")}
  ELSE '待核实' END
 $$;
 `;

@@ -18,11 +18,18 @@ test("统一品牌规则：SQL与应用一致、候选保存、人工名单、�
   await client.query(brandPolicyMigrationSql);
   await client.query("CREATE TRIGGER apply_ailingshi_override BEFORE INSERT OR UPDATE ON brand_stores FOR EACH ROW EXECUTE FUNCTION apply_ailingshi_override()");
   let id=0;
-  const fixtures=[];
+  const fixtures:Array<{brand:string;name:string;id:string;address:string;type?:string;typecode?:string;tag?:string;business?:{tag?:string;keytag?:string}}>=[];
   for(const brand of Object.keys(BRAND_IDENTITIES))for(const name of [brand,`${brand}超市（中心店）`,`${brand}便利店(公寓店)`,`${brand}量贩零食(饭店路店)`,`${brand}·特卖`,`${brand}蛋糕店`])
    for(const evidence of [{type:"购物服务",typecode:"060000"},{type:"餐饮服务;糕饼店",typecode:"050800"},{business:{keytag:"零食"}},{},{type:"购物服务",business:{tag:"蛋糕店"}},{typecode:"061200|050100"}]){
     const row={brand,name,id:`RULE-${++id}`,address:"测试地址",...evidence};fixtures.push(row);
    }
+  for(const row of [
+   {brand:"好想来",name:"好想来肉浇面",type:"餐饮服务;中餐厅;中餐厅",typecode:"050100",tag:"面馆;面馆"},
+   {brand:"好想来",name:"好想来足道",type:"生活服务;洗浴推拿场所;洗浴推拿场所",typecode:"071400",tag:"足疗;足疗"},
+   {brand:"老婆大人",name:"老婆大人生鲜超市",type:"购物服务;专卖店;专营店",typecode:"061200",tag:"生鲜超市;生鲜超市"},
+   {brand:"老婆大人",name:"老婆大人(中心店)",type:"购物服务",tag:"生鲜超市"},
+   {brand:"来优品",name:"来优品零食(泉山湖店)",type:"购物服务;综合市场;蔬菜市场|购物服务;专卖店;专营店",typecode:"060705|061200",tag:"零食;零食"},
+  ])fixtures.push({...row,id:`RULE-${++id}`,address:"测试地址"});
   for(const row of fixtures){
    const expected=assessBrandStore(row.brand,row);
    const result=(await client.query("SELECT brand_policy_decision($1,$2,$3,'',$4,$5,$6) decision,brand_policy_reason($1,$2,$3,'',$4,$5,$6) reason",[row.brand,row.name,row.id,row.type||"",row.typecode||"",JSON.stringify(row)])).rows[0];
