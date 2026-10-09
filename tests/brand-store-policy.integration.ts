@@ -29,6 +29,12 @@ test("统一品牌规则：SQL与应用一致、候选保存、人工名单、�
    {brand:"老婆大人",name:"老婆大人生鲜超市",type:"购物服务;专卖店;专营店",typecode:"061200",tag:"生鲜超市;生鲜超市"},
    {brand:"老婆大人",name:"老婆大人(中心店)",type:"购物服务",tag:"生鲜超市"},
    {brand:"来优品",name:"来优品零食(泉山湖店)",type:"购物服务;综合市场;蔬菜市场|购物服务;专卖店;专营店",typecode:"060705|061200",tag:"零食;零食"},
+   {brand:"糖巢",name:"糖巢省钱超市东新六路店",type:"购物服务;便民商店/便利店",typecode:"060200",tag:"便利店;便利店"},
+   {brand:"糖巢",name:"糖巢零食(三明学院店)",type:"餐饮服务;糕饼店;糕饼店",typecode:"050800",tag:"零食;零食",business:{keytag:"零食"}},
+   {brand:"好想来",name:"好想来品牌零食(中心店)",type:"餐饮服务;餐饮相关场所;餐饮相关",typecode:"050000",tag:"零食;零食"},
+   {brand:"好想来",name:"好想来品牌零食(中心店)",type:"餐饮服务;中餐厅;中餐厅",typecode:"050100",tag:"零食;零食"},
+   {brand:"好想来",name:"好想来",type:"餐饮服务;餐饮相关场所;餐饮相关",typecode:"050000",tag:"零食"},
+   {brand:"好想来",name:"好想来品牌零食(中心店)",type:"购物服务;专卖店;眼镜店|餐饮服务;餐饮相关场所;餐饮相关",typecode:"061200|050000",tag:"零食"},
   ])fixtures.push({...row,id:`RULE-${++id}`,address:"测试地址"});
   for(const row of fixtures){
    const expected=assessBrandStore(row.brand,row);

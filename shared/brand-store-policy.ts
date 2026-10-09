@@ -17,13 +17,15 @@ export const CAKE_TAG = "蛋糕|糕饼|西饼|烘焙|甜品";
 // categories stay reviewable because Amap can misclassify genuine brand stores.
 export const NON_TARGET_CATEGORY_TAG = "中餐厅|西餐厅|快餐厅|小吃店|面馆|粉面店|火锅店|烧烤店|奶茶店|咖啡厅|茶馆|洗浴|足疗|足道|足浴|按摩|推拿|养生馆|美容院|美发店|理发店|药店|药房|生鲜超市|生鲜店|生鲜市场|农贸市场|菜市场|水果店|蔬菜店|酒店|宾馆|民宿|仓库|物流";
 export const CONFLICT_TAG = "餐饮|住宿|医疗|公司企业|交通设施|科教文化|商务住宅";
+export const GENERIC_CATERING_TYPE = "餐饮服务;餐饮相关场所;餐饮相关";
+export const SHOPPING_TYPE_FOR_CONFLICT = "购物服务;(购物相关场所;购物相关场所|专卖店;专营店|便民商店/便利店;便民商店/便利店|超级市场;(超市|综合超市))";
 export const SIMILAR_NAME = "^(爱零食的喵|我爱零食|最爱零食|爱零食小屋)";
 export const POLICY_REASONS = {
   blacklist: "按 POI ID 人工排除", unrelated: "名称主体明确为餐饮、足浴、生鲜、仓库等非目标业态",
   similar: "相似名称，不按目标品牌收录", cake: "分类或标签明确为蛋糕／烘焙等非目标业态",
   category: "高德具体分类或标签明确为餐饮、足浴、生鲜等非目标业态",
   noId: "缺少 POI ID，待核验", name: "名称未匹配品牌完整结构，待核验",
-  conflict: "购物与其他业态证据冲突，待核验", tags: "缺少零食／超市／购物分类或标签证据，待核验",
+  conflict: "高德分类或标签证据冲突，待核验", tags: "缺少零食／超市／购物分类或标签证据，待核验",
   accepted: "品牌名称与零食／超市／购物证据通过初筛，未验证品牌归属",
   manual: "按 POI ID 人工确认名称，零食／超市／购物证据通过初筛",
 } as const;
@@ -31,7 +33,10 @@ export const isPolicyBrand = (brand: string) => Object.hasOwn(BRAND_IDENTITIES, 
 const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 export function brandNamePattern(brand: string) {
   const names = BRAND_IDENTITIES[brand] || [brand];
-  return `^(${names.map(escapeRegex).join("|")})(${RETAIL_SUFFIX})?(\\((?!\\s*店\\))[^()]+店\\))?$`;
+  const branch = "\\((?!\\s*店\\))[^()]+店\\)";
+  // A bare branch is accepted only after an explicit retail descriptor. A
+  // brand followed by arbitrary words (e.g. 爱零食小屋) remains unverified.
+  return `^(${names.map(escapeRegex).join("|")})(?:(?:·?(${RETAIL_SUFFIX}))(?:${branch}|[^()·,]{2,}店)?|${branch})?$`;
 }
 export type BrandPolicyPoi = { name?: unknown; amap_name?: unknown; id?: unknown; amap_poi_id?: unknown; type?: unknown; poi_type?: unknown; typecode?: unknown; tag?: unknown; business?: unknown };
 export function retailTags(row: BrandPolicyPoi) {
@@ -42,11 +47,22 @@ export function assessBrandStore(brand: string, row: BrandPolicyPoi, override: A
   const original_name = String(row.name ?? row.amap_name ?? ""), normalized_name = normalizeAilingshiName(original_name);
   const poi_id = String(row.id ?? row.amap_poi_id ?? "").trim(), primary = normalized_name.split("(")[0];
   const tags = retailTags(row), codes = String(row.typecode ?? "").replace(/\s/g, "").split(/[|;,]/);
+  const category = String(row.type ?? row.poi_type ?? "");
+  const business = row.business && typeof row.business === "object" ? row.business as Record<string, unknown> : {};
+  const businessSnack = [row.tag, business.tag, business.rectag, business.keytag]
+    .some(value => String(value ?? "").split(/[;,]/).some(label => label.trim() === "零食"));
+  const businessCategories = [row.tag, business.tag, business.rectag, business.keytag].map(value => String(value ?? "")).join(";");
   const retail = new RegExp(RETAIL_TAG).test(tags) || codes.some(c => /^06\d{4}$/.test(c));
   const snackEvidence = /零食/.test(tags);
   const cake = new RegExp(CAKE_TAG).test(tags);
   const nonTargetCategory = new RegExp(NON_TARGET_CATEGORY_TAG).test(tags);
   const conflict = cake || nonTargetCategory || new RegExp(CONFLICT_TAG).test(tags) || codes.some(c => /^\d{6}$/.test(c) && !/^(06\d{4}|070000)$/.test(c));
+  const shoppingType = new RegExp(`^${SHOPPING_TYPE_FOR_CONFLICT}$`);
+  const genericCatering = category.split("|").every(item => item === GENERIC_CATERING_TYPE || shoppingType.test(item)) && category.includes(GENERIC_CATERING_TYPE);
+  const cakeWithRetailProof = cake && /零食|超市|便利店/.test(primary) && businessSnack && !nonTargetCategory
+    && !new RegExp(CAKE_TAG).test(businessCategories)
+    && category.split("|").every(item => item.includes("糕饼店") || shoppingType.test(item));
+  const resolvedConflict = normalized_name !== brand && businessSnack && ((genericCatering && !nonTargetCategory && !cake) || cakeWithRetailProof);
   let decision: "接受" | "排除" | "待核实" = "待核实", decision_reason: string;
   if (poi_id && override === "exclude") { decision = "排除"; decision_reason = POLICY_REASONS.blacklist; }
   else if (new RegExp(UNRELATED_NAME).test(primary)) { decision = "排除"; decision_reason = POLICY_REASONS.unrelated; }
@@ -55,7 +71,7 @@ export function assessBrandStore(brand: string, row: BrandPolicyPoi, override: A
   else if (nonTargetCategory && !snackEvidence) { decision = "排除"; decision_reason = POLICY_REASONS.category; }
   else if (!poi_id) decision_reason = POLICY_REASONS.noId;
   else if (override !== "accept" && !new RegExp(brandNamePattern(brand)).test(normalized_name)) decision_reason = POLICY_REASONS.name;
-  else if (conflict) decision_reason = POLICY_REASONS.conflict;
+  else if (conflict && !resolvedConflict) decision_reason = POLICY_REASONS.conflict;
   else if (!retail) decision_reason = POLICY_REASONS.tags;
   else { decision = "接受"; decision_reason = override === "accept" ? POLICY_REASONS.manual : POLICY_REASONS.accepted; }
   return { original_name, normalized_name, poi_id, decision, decision_reason };
