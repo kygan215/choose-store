@@ -36,10 +36,11 @@ test("确认其他候选后只能使用所选门店电话", () => {
 test("重复查询合并时不会丢失已有电话", async () => {
   for (const firstHasPhone of [true, false]) {
     let count = 0;
-    const result = await discoverBrandStores(async () => {
+    const result = await discoverBrandStores(async (path) => {
+      if(path==="/v3/config/district")return {districts:[{districts:[{name:"甲区"},{name:"乙区"}]}]};
       const hasPhone = (++count === 1) === firstHasPhone;
       return {pois:[{...poi,business:{keytag:"零食",...(hasPhone ? {tel:"4000107777"} : {})}}]};
-    }, "陆小馋", "南京市", "建邺区", {aliases:["陆小馋零食"]});
+    }, "陆小馋", "南京市", "", {aliases:["陆小馋零食"]});
     assert.ok(count > 1);
     assert.equal(result.stores[0].tel, "4000107777");
   }

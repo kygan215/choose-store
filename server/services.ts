@@ -1,3 +1,4 @@
+import type { AilingshiOverride } from "../shared/ailingshi.js";
 import { waitForAmapSlot } from "./amap-limiter.js";
 import { concurrencyLimit, forEachConcurrent } from "./concurrency.js";
 import { isSnackRetailStore } from "./snack-retail.js";
@@ -54,8 +55,8 @@ export async function resolveStoreCandidates(input:Partial<StoreResolutionInput>
   return classifyResolutionCandidates([...poiCandidates,...normalized].sort((a,b)=>Number(b.score)-Number(a.score))).candidates;
 }
 
-export async function discoverBrandStores(brand:string,city:string,district="",request:typeof amap=amap,aliases:string[]=[]){
-  return discoverBrandStoreRows(request,brand,city,district,{maxPagesPerRegion:Number(process.env.BRAND_DISCOVERY_MAX_PAGES_PER_REGION||20),maxRequests:Number(process.env.BRAND_DISCOVERY_MAX_REQUESTS||160),aliases});
+export async function discoverBrandStores(brand:string,city:string,district="",request:typeof amap=amap,aliases:string[]=[],overrides:Record<string,AilingshiOverride>={}){
+  return discoverBrandStoreRows(request,brand,city,district,{maxPagesPerRegion:Number(process.env.BRAND_DISCOVERY_MAX_PAGES_PER_REGION||20),maxRequests:Number(process.env.BRAND_DISCOVERY_MAX_REQUESTS||160),aliases,overrides});
 }
 
 export async function geocode(body:Row){const address=[body.province,body.city,body.district,body.address||body.name].map(clean).join(""),data=await amap("/v3/geocode/geo",{address,city:clean(body.city)}),rows=Array.isArray(data.geocodes)?data.geocodes as Row[]:[];return rows.map((item,index)=>{const location=parseLocation(item.location);return location?{id:`GEO-${index}`,name:clean(body.name)||clean(item.formatted_address),formatted_address:clean(item.formatted_address),address:clean(item.formatted_address),province:clean(item.province),city:clean(item.city)||clean(body.city),district:clean(item.district),adcode:clean(item.adcode),location,type:"地址定位",typecode:"",score:58,status:"地址定位结果，待确认",reasons:["根据详细地址完成地理编码"],source:"amap_geocode",auto_confirm:false,photos:[],conflicts:[],warnings:["仅验证了地址位置，尚未验证门店身份"]}:null}).filter(Boolean)};

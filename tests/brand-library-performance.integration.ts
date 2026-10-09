@@ -27,6 +27,7 @@ test("6万门店筛选及深页查询低于500ms，保留规则与实时判定�
         '零食有鸣批发超市(东城转盘店)','零食有鸣批发超市(东溪县店)',
         '零食有鸣批发超市(红滨路店)','零食有鸣批发超市(江南半岛店)',
         '零食有鸣批发超市(龙王沟店)']) WITH ORDINALITY names(name,n)`);
+    await client.query("UPDATE brand_stores SET amap_poi_id=source_uid,poi_type='购物服务',typecode='060000'");
     await client.query("ANALYZE brand_stores");
     assert.equal(Number((await client.query(`SELECT count(*) count FROM brand_stores WHERE library_visible IS DISTINCT FROM ${snackRetailSql()}`)).rows[0].count),0);
     assert.equal(Number((await client.query("SELECT count(*) count FROM brand_stores WHERE tenant_id=2 AND library_visible")).rows[0].count),9);
@@ -48,6 +49,6 @@ test("6万门店筛选及深页查询低于500ms，保留规则与实时判定�
 });
 
 test("迁移中的可见性计算与当前保留规则一致",()=>{
-  const migration=fs.readFileSync(new URL("../server/migrations/009_brand_library_browse.sql",import.meta.url),"utf8");
-  assert.ok(migration.includes(`GENERATED ALWAYS AS (${snackRetailSql()}) STORED`));
+  const migration=fs.readFileSync(new URL("../server/migrations/012_brand_store_review.sql",import.meta.url),"utf8");
+  assert.ok(migration.includes(`SET EXPRESSION AS (${snackRetailSql()})`));
 });

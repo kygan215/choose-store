@@ -1,0 +1,43 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { assessBrandStore, BRAND_IDENTITIES } from "../shared/brand-store-policy.js";
+import { discoverBrandStores } from "../server/store-search.js";
+
+test("13个品牌统一接受零食、超市、购物分类，品牌名称本身不能充当标签",()=>{
+  for(const brand of Object.keys(BRAND_IDENTITIES))for(const name of [brand,`${brand}(中心店)`,`${brand}超市（中心店）`,`${brand}便利店(中心店)`]){
+    for(const extra of [{type:"购物服务"},{typecode:"060200"},{business:{keytag:"零食"}},{tag:"综合超市"}])
+      assert.equal(assessBrandStore(brand,{name,id:"B",...extra}).decision,"接受",name);
+    assert.equal(assessBrandStore(brand,{name,id:"B"}).decision,"待核实",name);
+  }
+});
+test("相似名称不自动收录，蛋糕明确排除，冲突证据待核验",()=>{
+  for(const name of ["爱零食的喵(科技大学西门店)","我爱零食","我爱零食屋","最爱零食","爱零食小屋"])
+    assert.equal(assessBrandStore("爱零食",{name,id:"B",type:"购物服务"}).decision,"排除",name);
+  for(const name of ["爱零食中心店","爱零食·特卖","爱零食()","爱零食(店)","爱零食(中心店)特卖"])
+    assert.equal(assessBrandStore("爱零食",{name,id:"B",type:"购物服务"}).decision,"待核实",name);
+  assert.equal(assessBrandStore("糖巢",{name:"糖巢御品(三明店)",id:"B",type:"餐饮服务;糕饼店"}).decision,"排除");
+  assert.equal(assessBrandStore("糖巢",{name:"糖巢(三明店)",id:"B",type:"购物服务;糕饼店"}).decision,"待核实");
+  assert.equal(assessBrandStore("零食很忙",{name:"零食很忙(中心店)",id:"B",type:"餐饮服务",tag:"零食"}).decision,"待核实");
+  assert.equal(assessBrandStore("好想来",{name:"好像来(中心店)",id:"B",type:"购物服务"}).decision,"待核实");
+  assert.equal(assessBrandStore("赵一鸣零食",{name:"赵一鸣省钱超市(中心店)",id:"B",type:"购物服务"}).decision,"接受");
+  for (const name of ["来优品品牌零食(康乐街店)", "来优品零食乐园(双港老街店)"])
+    assert.equal(assessBrandStore("来优品",{name,id:"B",type:"购物服务"}).decision,"接受",name);
+});
+test("8家已确认零食有鸣超市和分店餐馆、公寓地标不误判",()=>{
+ for(const branch of ["苍溪城郊中学店","苍溪县汉水秀城店","苍溪元坝镇店","东城转盘店","东溪县店","红滨路店","江南半岛店","龙王沟店","公寓店","幸福蛋糕店旁店"]){
+  assert.equal(assessBrandStore("零食有鸣",{id:"B",name:`零食有鸣批发超市(${branch})`,typecode:"060000",tag:"日杂店"}).decision,"接受",branch);
+ }
+});
+test("人工确认名称不能绕过标签门槛，黑名单优先，无ID仍待核验",()=>{
+ assert.equal(assessBrandStore("糖巢",{id:"B",name:"糖巢·特卖"},"accept").decision,"待核实");
+ assert.equal(assessBrandStore("糖巢",{id:"B",name:"糖巢·特卖",type:"购物服务"},"accept").decision,"接受");
+ assert.equal(assessBrandStore("糖巢",{id:"B",name:"糖巢",type:"购物服务"},"exclude").decision,"排除");
+ assert.equal(assessBrandStore("糖巢",{name:"糖巢",type:"购物服务"},"accept").decision,"待核实");
+});
+test("品牌发现统一保存候选、按POI去重、默认只输出接受，旧别名不能绕过规则",async()=>{
+ const rows=[{id:"GOOD",name:"爱零食硬折扣超市(横州新福店)",type:"购物服务"},{id:"PENDING",name:"爱零食(中心店)"},{id:"CAKE",name:"爱零食蛋糕店",type:"购物服务"}].map(row=>({...row,location:"114,30"}));
+ const result=await discoverBrandStores(async()=>({pois:[...rows,rows[0]]}),"爱零食","测试市","测试区");
+ assert.deepEqual(result.stores.map(row=>row.id),["GOOD"]);assert.equal(result.assessments?.length,3);
+ const alias=await discoverBrandStores(async()=>({pois:[{id:"OLD",name:"好像来(中心店)",type:"购物服务",location:"114,30"}]}),"好想来零食","测试市","测试区");
+ assert.equal(alias.stores.length,0);assert.equal(alias.assessments?.[0]?.decision,"待核实");
+});

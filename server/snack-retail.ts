@@ -1,3 +1,4 @@
+import { assessAilingshi } from "../shared/ailingshi.js";
 import { DEFAULT_SNACK_BRANDS, RETIRED_SNACK_BRANDS } from "./snack-brands.js";
 // Target brands may carry broad retail tags instead of Amap's snack tag.
 // Ignore branch names (which can contain nearby restaurant/street names).
@@ -9,8 +10,11 @@ const targetBrandPattern = `^(${[...new Set(DEFAULT_SNACK_BRANDS.flatMap(brand=>
 const targetBrand = new RegExp(targetBrandPattern);
 const suspectedTargetBrand = new RegExp(targetBrandPattern.slice(1));
 const BROAD_RETAIL_TAG = "日杂店|综合超市";
+const CAKE_SHOP = "蛋糕|糕饼|西饼";
+const RETAIL_EVIDENCE = "零食|超市|日杂店";
+const cakeShop = new RegExp(CAKE_SHOP);
 const clean = (value: unknown) => String(value ?? "").trim();
-type SnackPoi = {name?:unknown;amap_name?:unknown;type?:unknown;poi_type?:unknown;typecode?:unknown;tag?:unknown;business?:unknown};
+type SnackPoi = {id?:unknown;amap_poi_id?:unknown;name?:unknown;amap_name?:unknown;type?:unknown;poi_type?:unknown;typecode?:unknown;tag?:unknown;business?:unknown};
 export function snackTags(row: SnackPoi) {
   const business = row.business && typeof row.business === "object" ? row.business as {tag?:unknown;rectag?:unknown;keytag?:unknown} : {};
   return [...new Set([clean(row.tag), clean(business.tag), clean(business.rectag), clean(business.keytag)].filter(Boolean))].join(";");
@@ -22,11 +26,20 @@ export function isTargetSnackBrandName(value: unknown) {
 
 export function hasClearlyNonSnackEvidence(row: SnackPoi) {
   const name = clean(row.name ?? row.amap_name).replace(/\s/g, "").split(/[（(]/)[0];
-  // Category labels alone are not reliable enough to delete an existing shop.
-  return nonSnackName.test(name);
+  return nonSnackName.test(name) || hasCakeShopEvidence(row);
+}
+
+// Explicit cake-shop evidence is excluded unless retail evidence conflicts.
+// Parenthesized branch landmarks are never used as business-type evidence.
+export function hasCakeShopEvidence(row: SnackPoi) {
+  const name = clean(row.name ?? row.amap_name).replace(/\s/g, "").split(/[（(]/)[0];
+  const evidence = `${name};${clean(row.type ?? row.poi_type)};${snackTags(row)}`;
+  return cakeShop.test(evidence) && !new RegExp(RETAIL_EVIDENCE).test(evidence);
 }
 
 export function hasCategoryConflict(row: SnackPoi) {
+  const name = clean(row.name ?? row.amap_name).replace(/\s/g, "").split(/[（(]/)[0];
+  if (cakeShop.test(`${name};${clean(row.type ?? row.poi_type)};${snackTags(row)}`)) return true;
   const codes = clean(row.typecode).replace(/\s/g, "");
   if (codes.split(/[|;,]/).some(code => /^\d{6}$/.test(code) && !/^(06\d{4}|070000)$/.test(code))) return true;
   // Amap also files verified snack shops under this generic service category.
@@ -43,6 +56,7 @@ export function isSnackRetailStore(row: SnackPoi) {
 }
 
 export function canRetainSnackStore(row: SnackPoi, requestedBrand = "") {
+  if(requestedBrand==="爱零食")return assessAilingshi(row.name??row.amap_name,row.id??row.amap_poi_id).decision==="接受";
   if (hasClearlyNonSnackEvidence(row)) return false;
   const name = clean(row.name ?? row.amap_name).replace(/\s/g, "").split(/[（(]/)[0];
   return isSnackRetailStore(row) || isTargetSnackBrandName(name) ||
@@ -63,5 +77,33 @@ export function snackRetailSql(alias = "") {
   return `(${prefix}brand_name NOT IN (${retired})
     AND NOT (${prefix}brand_name ~ '[、，,]' AND ${prefix}brand_name ~ '零食优选|零食好能嗨|零食很能嗨')
     AND split_part(split_part(regexp_replace(${prefix}amap_name, '[[:space:]]', '', 'g'), '(', 1), '（', 1) <> ''
-    AND split_part(split_part(regexp_replace(${prefix}amap_name, '[[:space:]]', '', 'g'), '(', 1), '（', 1) !~ '${NON_SNACK_NAME}')`;
+    AND split_part(split_part(regexp_replace(${prefix}amap_name, '[[:space:]]', '', 'g'), '(', 1), '（', 1) !~ '${NON_SNACK_NAME}'
+    AND NOT ${cakeShopSql(alias)})`;
+}
+
+function snackSqlFields(alias = "") {
+  if (alias && !/^[a-z_]+$/.test(alias)) throw new Error("Invalid SQL alias");
+  const p = alias ? `${alias}.` : "";
+  const name = `split_part(split_part(regexp_replace(COALESCE(${p}amap_name,''), '[[:space:]]', '', 'g'), '(', 1), '（', 1)`;
+  const type = `COALESCE(${p}poi_type,'')`;
+  const tags = ["->>'tag'","#>>'{business,tag}'","#>>'{business,rectag}'","#>>'{business,keytag}'"].map(field=>`COALESCE(${p}raw_json${field},'')`).join(" || ';' || ");
+  return {name,type,tags,codes:`regexp_replace(COALESCE(${p}typecode,''), '[[:space:]]', '', 'g')`,evidence:`(${name} || ';' || ${type} || ';' || ${tags})`};
+}
+
+function cakeShopSql(alias = "") {
+  const {evidence} = snackSqlFields(alias);
+  return `(${evidence} ~ '${CAKE_SHOP}' AND ${evidence} !~ '${RETAIL_EVIDENCE}')`;
+}
+
+// Persist this result at write time so nationwide review filtering uses an index.
+export function snackNeedsReviewSql(alias = "") {
+  const {name,type,tags,codes,evidence} = snackSqlFields(alias);
+  const literal = (value:string)=>`'${value.replace(/'/g,"''")}'`;
+  const badCode = "(^|[|;,])(?!06[0-9]{4}([|;,]|$)|070000([|;,]|$))[0-9]{6}([|;,]|$)";
+  return `(NOT (${name} <> '' AND ${name} !~ ${literal(NON_SNACK_NAME)}
+    AND ${evidence} !~ '${CAKE_SHOP}'
+    AND ${codes} !~ '${badCode}'
+    AND replace(${type},'生活服务;生活服务场所;生活服务场所','') !~ '${NON_RETAIL_TYPE}'
+    AND ((${type} || ';' || ${tags}) ~ '零食'
+      OR (${name} ~ ${literal(targetBrandPattern)} AND (${type} || ';' || ${tags}) ~ '${BROAD_RETAIL_TAG}'))))`;
 }

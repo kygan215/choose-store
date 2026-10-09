@@ -8,6 +8,17 @@ type RemovedPage={rows:RemovedStore[];total:number;page:number;pages:number};
 type Request=<T>(path:string,init?:RequestInit)=>Promise<T>;
 type Target={ids:number[];name?:string;action:"delete"|"restore"};
 
+export function BrandPoiReviewDialog({name,poiId,action,onClose,onSubmit}:{name:string;poiId:string;action:"accept"|"exclude"|"reset";onClose:()=>void;onSubmit:(reason:string)=>Promise<void>}){
+  const ref=useRef<HTMLDialogElement>(null),[reason,setReason]=useState(""),[busy,setBusy]=useState(false),[error,setError]=useState("");
+  useEffect(()=>{const dialog=ref.current;dialog?.showModal();return()=>dialog?.close()},[]);
+  const label=action==="accept"?"确认纳入":action==="exclude"?"确认排除":"恢复自动规则";
+  return <dialog ref={ref} className="brand-removal-dialog" aria-label="确认门店名单操作" onCancel={e=>{e.preventDefault();if(!busy)onClose()}}><form onSubmit={async e=>{e.preventDefault();if(busy)return;setBusy(true);setError("");try{await onSubmit(reason)}catch(error){setError(error instanceof Error?error.message:"保存失败")}finally{setBusy(false)}}}>
+    <h2>{label}</h2><p>{name}<br/>POI ID：{poiId}</p><p>仅针对这个 POI ID 保存白名单或黑名单，后续查询刷新沿用，可恢复自动规则。人工确认品牌名称后，仍须满足零食／超市／购物分类要求；缺失或冲突标签继续待核验。</p>
+    <label>核实依据<textarea autoFocus required aria-label="核实依据" value={reason} maxLength={500} onChange={e=>setReason(e.target.value)}/></label>
+    {error&&<p role="alert">{error}</p>}<div className="brand-removal-actions"><button type="button" disabled={busy} onClick={onClose}>取消</button><button type="submit" disabled={busy||!reason.trim()}>{busy?"保存中…":"确认保存"}</button></div>
+  </form></dialog>;
+}
+
 export function BrandStoreRemovalDialog({target,onClose,onSubmit}:{target:Target;onClose:()=>void;onSubmit:(reason:string)=>Promise<void>}){
   const ref=useRef<HTMLDialogElement>(null),[reason,setReason]=useState(""),[busy,setBusy]=useState(false),[error,setError]=useState("");
   useEffect(()=>{const dialog=ref.current;dialog?.showModal();return()=>dialog?.close()},[]);
