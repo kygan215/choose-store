@@ -217,6 +217,50 @@ test("全量品牌查询达到请求保护上限时明确标记结果可能不�
   assert.equal(result.stores.length,25);
 });
 
+test("直辖市查询展开城区和郊县中间层，按真实区县检索",async()=>{
+  const calls:Array<Record<string,string|number|boolean>>=[];
+  const amap:AmapSearch=async(path,params)=>{
+    calls.push(params);
+    if(path==="/v3/config/district")return {districts:[{name:"重庆市",districts:[
+      {name:"重庆城区",level:"city",adcode:"500100",districts:[{name:"渝中区",level:"district",adcode:"500103"}]},
+      {name:"重庆郊县",level:"city",adcode:"500200",districts:[{name:"丰都县",level:"district",adcode:"500230"}]},
+    ]}]};
+    return {pois:[]};
+  };
+  const result=await discoverBrandStores(amap,"养馋记","重庆市");
+  assert.equal(calls[0].subdistrict,2);
+  assert.deepEqual(calls.slice(1).map(call=>call.region),["500103","500230"]);
+  assert.deepEqual(result.regions,["渝中区","丰都县"]);
+  assert.equal(result.complete,true);
+});
+
+test("直辖市行政区缺少下级时使用真实城市名并拒收外地结果",async()=>{
+  const calls:Array<Record<string,string|number|boolean>>=[];
+  const amap:AmapSearch=async(path,params)=>{
+    calls.push(params);
+    if(path==="/v3/config/district")return {districts:[{name:"北京市",districts:[{name:"北京城区",level:"city",adcode:"110100"}]}]};
+    return {pois:[
+      {...storePoi,id:"BJ1",name:"养馋记(东城店)",pname:"北京市",cityname:"北京市"},
+      {...storePoi,id:"OUTSIDE",name:"养馋记(武汉店)"},
+    ]};
+  };
+  const result=await discoverBrandStores(amap,"养馋记","北京市");
+  assert.equal(calls[1].region,"北京市");
+  assert.deepEqual(result.stores.map(store=>store.id),["BJ1"]);
+  assert.deepEqual(result.assessments?.map(row=>row.id),["BJ1"]);
+  assert.equal(result.complete,false,"外地结果意味着区域限制失效，不能标记完整缓存");
+});
+
+test("直辖市直接返回区县时保留区县，兼容不带市的城市输入",async()=>{
+  const calls:Array<Record<string,string|number|boolean>>=[];
+  const amap:AmapSearch=async(path,params)=>{calls.push(params);return path==="/v3/config/district"?{districts:[{districts:[{name:"黄浦区",level:"district",adcode:"310101"}]}]}:{pois:[]}};
+  const result=await discoverBrandStores(amap,"养馋记","上海");
+  assert.equal(calls[0].subdistrict,2);
+  assert.equal(calls[1].region,"310101");
+  assert.deepEqual(result.regions,["黄浦区"]);
+  assert.equal(result.complete,true);
+});
+
 test("品牌门店库维护的别名会参与查询并归入标准品牌",async()=>{
   const calls:string[]=[];
   const amap:AmapSearch=async(path,params)=>{calls.push(String(params.keywords||""));return path==="/v5/place/text"&&params.keywords==="测试零食别名"?{status:"1",pois:[{id:"ALIAS1",name:"测试零食别名(中心店)",address:"测试路1号",type:"购物服务;零食店",cityname:"武汉市",adname:"洪山区",location:"114.3,30.5"}]}:{status:"1",districts:[],pois:[]}};

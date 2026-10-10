@@ -203,14 +203,24 @@ function discoveryCandidate(raw:SearchRow,brand:string,terms:string[],manual:Ail
 export async function discoverBrandStores(amap:AmapSearch,brandInput:string,cityInput:string,districtInput="",options:{maxPagesPerRegion?:number;maxRequests?:number;aliases?:string[];overrides?:Record<string,AilingshiOverride>}={}):Promise<BrandStoreDiscoveryResult>{
   const brand=canonicalSnackBrand(clean(brandInput)),city=clean(cityInput),district=clean(districtInput);if(!brand)throw new Error("请输入品牌名称");if(isRetiredSnackBrand(brand))throw new Error("该品牌已从系统名单移除");if(!city)throw new Error("请输入城市");
   const plan=buildStoreSearchPlan(brand,city,district),terms=isPolicyBrand(brand)?BRAND_IDENTITIES[brand]:unique([plan.brand||brand,...plan.brand_aliases,...(options.aliases||[]),brand]),maxPages=Math.max(1,Math.min(8,Number(options.maxPagesPerRegion||8))),maxRequests=Math.max(1,Math.min(500,Number(options.maxRequests||160))),pageSize=25;
+  const municipality=["北京","天津","上海","重庆"].find(name=>withoutSuffix(city,["市"])===name);
   let requests=0,truncated=false;const regions:Array<{label:string;value:string}>=[];
   if(district)regions.push({label:district,value:district});
   else{
     try{
       if(requests>=maxRequests)truncated=true;
       else{
-        requests++;const data=await amap("/v3/config/district",{keywords:city,subdistrict:1,extensions:"base"}),roots=Array.isArray(data.districts)?data.districts as SearchRow[]:[],children=roots.length&&Array.isArray(roots[0].districts)?roots[0].districts as SearchRow[]:[];
-        for(const child of children){const label=clean(child.name),value=clean(child.adcode)||label;if(label&&value)regions.push({label,value})}
+        // Municipalities have an extra city layer (e.g. 北京城区). Its code is
+        // not a district search region; expand it before calling POI search.
+        requests++;const data=await amap("/v3/config/district",{keywords:city,subdistrict:municipality?2:1,extensions:"base"}),roots=Array.isArray(data.districts)?data.districts as SearchRow[]:[],children=roots.length&&Array.isArray(roots[0].districts)?roots[0].districts as SearchRow[]:[];
+        let needsCityFallback=false;
+        for(const child of children){
+          const intermediate=municipality&&(child.level==="city"||/城区$|郊县$/.test(clean(child.name)));
+          const districts=intermediate?(Array.isArray(child.districts)?child.districts as SearchRow[]:[]):[child];
+          if(intermediate&&!districts.length)needsCityFallback=true;
+          for(const area of districts){const label=clean(area.name),value=clean(area.adcode)||label;if(label&&value&&!regions.some(region=>region.value===value))regions.push({label,value})}
+        }
+        if(needsCityFallback)regions.push({label:city,value:city});
       }
     }catch{/* 行政区接口不可用时退回城市级分页。 */}
   }
@@ -222,6 +232,10 @@ export async function discoverBrandStores(amap:AmapSearch,brandInput:string,city
         if(requests>=maxRequests){truncated=true;break outer}
         requests++;const data=await amap("/v5/place/text",{keywords:keyword,region:region.value,city_limit:true,show_fields:"business,navi",page_size:pageSize,page_num:page}),rows=Array.isArray(data.pois)?data.pois as SearchRow[]:[];
         for(const row of rows){
+          // Amap can fall back to nationwide results for an invalid region.
+          // Never store those results or declare this municipal cache complete.
+          const actualCity=clean(row.cityname||row.city),actualProvince=clean(row.pname||row.province);
+          if(municipality&&((actualCity&&withoutSuffix(actualCity,["市"])!==municipality)||(!actualCity&&actualProvince&&withoutSuffix(actualProvince,["市"])!==municipality))){truncated=true;continue}
           if(isPolicyBrand(brand)){
             const assessment=assessBrandStore(brand,row,options.overrides?.[clean(row.id)]),regionPath=parseRegionPath(row.district);
             const candidate={...row,...assessment,name:assessment.original_name,id:clean(row.id),location:parseLocation(row.location),address:clean(row.address),province:clean(row.pname||row.province)||regionPath.province,city:clean(row.cityname||row.city)||regionPath.city,district:clean(row.adname)||regionPath.district};
