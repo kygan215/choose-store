@@ -30,7 +30,7 @@ test("关键词保持爱零食、同POI去重，输出所有判断但默认门�
   assert.ok(result.stores.every(row=>assessBrandStore("爱零食",row).decision==="接受"));
 });
 test("后续检索严格沿用POI白黑名单，不扩大到同名其他POI",async()=>{
-  const rows=[{id:"WHITE",name:"爱零食·特卖"},{id:"OTHER",name:"爱零食·特卖"},{id:"BLACK",name:"爱零食(中心店)"}].map(row=>({...row,location:"114,30",type:"购物服务"}));
+  const rows=[{id:"WHITE",name:"未确认前缀爱零食·特卖"},{id:"OTHER",name:"未确认前缀爱零食·特卖"},{id:"BLACK",name:"爱零食(中心店)"}].map(row=>({...row,location:"114,30",type:"购物服务"}));
   const result=await discoverBrandStores(async()=>({pois:rows}),"爱零食","测试市","测试区",{overrides:{WHITE:"accept",BLACK:"exclude"}});
   assert.deepEqual(result.stores.map(row=>row.id),["WHITE"]);
   assert.deepEqual(result.assessments?.map(row=>row.decision),["接受","待核实","排除"]);

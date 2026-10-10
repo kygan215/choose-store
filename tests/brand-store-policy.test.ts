@@ -2,6 +2,53 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { assessBrandStore, BRAND_IDENTITIES } from "../shared/brand-store-policy.js";
 import { discoverBrandStores } from "../server/store-search.js";
+import { brandNameFormatFixtures } from "./brand-name-format-fixtures.js";
+import { relatedEvidenceFixtures } from "./brand-related-evidence-fixtures.js";
+import { excludedLabelFixtures } from "./brand-excluded-label-fixtures.js";
+import { hxlRetailFixtures } from "./hxl-retail-fixtures.js";
+
+test("好想来相关零售餐饮证据放行前缀和非规范分店，保留排除边界",()=>{
+  for(const {expected,...row} of hxlRetailFixtures){
+    assert.equal(assessBrandStore("好想来",{id:"HXL",...row}).decision,expected,row.name);
+    assert.equal(assessBrandStore("好想来",{id:"HXL",...row},"exclude").decision,"排除");
+  }
+  assert.equal(assessBrandStore("糖巢",{id:"OTHER",name:"常平糖巢零食店",tag:"零食"}).decision,"待核实","仅放宽好想来");
+});
+
+test("好想来全食优选及七类明确标签排除，以商业标签优先且不匹配地标",()=>{
+  for(const {brand,expected,...row} of excludedLabelFixtures){
+    assert.equal(assessBrandStore(brand,{id:"LABEL",...row}).decision,expected,JSON.stringify(row));
+    if(expected==="排除")assert.equal(assessBrandStore(brand,{id:"LABEL",...row},"accept").decision,"排除");
+  }
+  assert.ok(BRAND_IDENTITIES["好想来"].includes("好想来全食优选"));
+});
+
+test("相关购物餐饮证据允许非规范名称，缺失和明显异业标签待核验", () => {
+  for (const [brand,name,type,tag,expected] of relatedEvidenceFixtures) {
+    const row={id:"RELATED",name,type,tag};
+    assert.equal(assessBrandStore(brand,row).decision,expected,name);
+    assert.equal(assessBrandStore(brand,row,"exclude").decision,"排除",`黑名单 ${name}`);
+  }
+});
+
+test("正常分店名称加零食标签覆盖儿童用品、住宿及学校错类，硬性排除仍优先", () => {
+  for (const [brand, name] of [["好想来", "古现好想来零食店"], ["爱零食", "爱零食新世界店(东云路店)"], ["老婆大人", "老婆大人中昌路店"], ["零食很忙", "零食很忙河底街"]]) {
+    for (const type of ["购物服务;专卖店;儿童用品店", "住宿服务;宾馆酒店;宾馆酒店", "科教文化服务;学校;高等院校"]) {
+      const row = { id: "NORMAL", name, type, business: { tag: "零食" } };
+      assert.equal(assessBrandStore(brand, row).decision, "接受", `${name}/${type}`);
+      assert.equal(assessBrandStore(brand, row, "exclude").decision, "排除");
+      assert.equal(assessBrandStore(brand, { ...row, tag: "足疗" }).decision, "待核实");
+    }
+  }
+});
+
+test("用户确认的名称容错、便利待核验和无关业态优先排除", () => {
+  for (const [brand, name, tag, decision] of brandNameFormatFixtures) {
+    const result = assessBrandStore(brand, { id: "FORMAT", name, tag, type: "购物服务;专卖店;专营店", typecode: "061200" });
+    assert.equal(result.decision, decision, name);
+    assert.equal(result.original_name, name);
+  }
+});
 
 test("13个品牌统一接受零食、超市、购物分类，裸品牌名称仍须外部证据",()=>{
   for(const brand of Object.keys(BRAND_IDENTITIES))for(const name of [brand,`${brand}(中心店)`,`${brand}超市（中心店）`,`${brand}便利店(中心店)`]){
@@ -14,7 +61,9 @@ test("13个品牌统一接受零食、超市、购物分类，裸品牌名称仍
 test("相似名称不自动收录，蛋糕明确排除，冲突证据待核验",()=>{
   for(const name of ["爱零食的喵(科技大学西门店)","我爱零食","我爱零食屋","最爱零食","爱零食小屋"])
     assert.equal(assessBrandStore("爱零食",{name,id:"B",type:"购物服务"}).decision,"排除",name);
-  for(const name of ["爱零食中心店","爱零食·特卖","爱零食()","爱零食(店)","爱零食(中心店)特卖"])
+  for(const name of ["爱零食中心店","爱零食·特卖"])
+    assert.equal(assessBrandStore("爱零食",{name,id:"B",type:"购物服务"}).decision,"接受",name);
+  for(const name of ["爱零食()","爱零食(店)","爱零食(中心店)特卖"])
     assert.equal(assessBrandStore("爱零食",{name,id:"B",type:"购物服务"}).decision,"待核实",name);
   assert.equal(assessBrandStore("糖巢",{name:"糖巢御品(三明店)",id:"B",type:"餐饮服务;糕饼店"}).decision,"排除");
   assert.equal(assessBrandStore("糖巢",{name:"糖巢(三明店)",id:"B",type:"购物服务;糕饼店"}).decision,"排除");
@@ -29,7 +78,7 @@ test("零售后缀后的无括号分店名与零食标签可以完成初筛",()=
   assert.equal(assessBrandStore("糖巢",{id:"B0L3SN1A0K",name:"糖巢省钱超市东新六路店",type:"购物服务;便民商店/便利店",tag:"便利店;便利店"}).decision,"接受");
   assert.equal(assessBrandStore("戴永红",{id:"B",name:"戴永红量贩零食中天广场店",type:"购物服务",tag:"零食"}).decision,"接受");
   assert.equal(assessBrandStore("好想来",{id:"B",name:"好想来·省钱超市(横沥田坑店)",type:"购物服务",tag:"综合超市"}).decision,"接受");
-  assert.equal(assessBrandStore("爱零食",{id:"B",name:"爱零食中心店",type:"购物服务",tag:"零食"}).decision,"待核实");
+  assert.equal(assessBrandStore("爱零食",{id:"B",name:"爱零食中心店",type:"购物服务",tag:"零食"}).decision,"接受");
   assert.equal(assessBrandStore("爱零食",{id:"B",name:"爱零食小屋店",type:"购物服务",tag:"零食"}).decision,"排除");
 });
 test("零食商业标签与高德旧分类冲突时，仅放行有明确零售证据的门店",()=>{
@@ -56,7 +105,7 @@ test("零食标签和购物分类明确时识别品牌主体后的无括号地�
   assert.equal(assessBrandStore("戴永红",{id:"B",name:"戴永红文星门路店",type:"购物服务;专卖店;专营店",tag:"零食;零食"}).decision,"接受");
   assert.equal(assessBrandStore("零食悦",{id:"B",name:"零食悦锦粼天序店",type:"购物服务;专卖店;专营店",tag:"零食"}).decision,"接受");
   assert.equal(assessBrandStore("爱零食",{id:"B",name:"爱零食中心店",type:"购物服务;专卖店;专营店",tag:"零食"}).decision,"接受");
-  assert.equal(assessBrandStore("戴永红",{id:"B",name:"戴永红文星门路店",type:"购物服务;专卖店;专营店"}).decision,"待核实");
+  assert.equal(assessBrandStore("戴永红",{id:"B",name:"戴永红文星门路店",type:"购物服务;专卖店;专营店"}).decision,"接受");
   assert.equal(assessBrandStore("好想来",{id:"B",name:"好想来台球店",type:"购物服务;专卖店;专营店",tag:"零食"}).decision,"排除");
 });
 test("品牌名称后只有地址括号时，购物分类与零食标签可完成初筛",()=>{
@@ -70,11 +119,11 @@ test("品牌名称后只有地址括号时，购物分类与零食标签可完�
   assert.equal(assessBrandStore("好想来",{id:"B",name:"好想来品牌零食(凯升公馆店)",type:shopping,tag:"零食;零食"}).decision,"接受");
   assert.equal(assessBrandStore("好想来",{id:"B",name:"好想来品牌零食(暂停营业)",type:shopping,tag:"零食;零食"},"accept").decision,"排除");
   assert.equal(assessBrandStore("爱零食",{id:"B",name:"爱零食(胜利北路)",type:shopping,tag:"零食"}).decision,"接受");
-  assert.equal(assessBrandStore("好想来",{id:"B",name:"好想来品牌零食(胜利北路)",type:"餐饮服务;中餐厅;中餐厅",tag:"零食"}).decision,"待核实");
+  assert.equal(assessBrandStore("好想来",{id:"B",name:"好想来品牌零食(胜利北路)",type:"餐饮服务;中餐厅;中餐厅",tag:"零食"}).decision,"接受");
 });
 
 test("规范连锁名称优先于高德泛类或错类，明确异业和近似品牌仍排除",()=>{
-  const examples: Array<[string,string,string,string,string,string,"接受"|"排除"]> = [
+  const examples: Array<[string,string,string,string,string,string,"接受"|"排除"|"待核实"]> = [
     ["好想来","B0KAFCIF0Y","好想来品牌零食店(恒太城店)","购物服务;专卖店;专营店","061200","零食;零食","接受"],
     ["好想来","B0LK0D7FD2","好想来省钱超市(保定定州东亭镇店)(保定定州市东亭镇店)","购物服务;购物相关场所;购物相关场所","060000","零食;零食","接受"],
     ["爱零食","B0IDUDSVCD","爱零食-花明楼店","购物服务;购物相关场所;购物相关场所","060000","零食;零食","接受"],
@@ -84,8 +133,8 @@ test("规范连锁名称优先于高德泛类或错类，明确异业和近似�
     ["好想来","B0MG4SWQCD","(好想来钓鱼)休闲娱乐钓场","体育休闲服务;休闲场所;垂钓园","080502","垂钓园;垂钓园","排除"],
     ["好想来","B0MDVDNH0C","好想来(丘集店)","餐饮服务;中餐厅;中餐厅","050100","零食;零食","接受"],
     ["好想来","B0JDAZAI65","好想来零食乐园(临沂兰山区义堂镇店)","公司企业;工厂;工厂|购物服务;购物相关场所;购物相关场所","170300|060000","好想来;零食","接受"],
-    ["好想来","B0L2JL7DBO","好想来品牌零食(保利·紫荆公馆店)","住宿服务;住宿服务相关;住宿服务相关","100000","住宿服务,住宿服务相关,住宿服务相关","接受"],
-    ["好想来","B0MGBHTMCZ","好想来","体育休闲服务;娱乐场所;棋牌室","080306","棋牌室","排除"],
+    ["好想来","B0L2JL7DBO","好想来品牌零食(保利·紫荆公馆店)","住宿服务;住宿服务相关;住宿服务相关","100000","住宿服务,住宿服务相关,住宿服务相关","排除"],
+    ["好想来","B0MGBHTMCZ","好想来","体育休闲服务;娱乐场所;棋牌室","080306","棋牌室","待核实"],
     ["好想来","B0K2JS5NT6","好想来(南通启东市东海镇店)","生活服务;生活服务场所;生活服务场所","070000","生活服务,生活服务场所,生活服务场所","接受"],
     ["好想来","B0K3J1GIHR","好想来(台州温岭市泽国镇牧南店)","生活服务;生活服务场所;生活服务场所","070000","生活服务,生活服务场所,生活服务场所","接受"],
     ["好想来","B0MUBR80KO","好想来省钱超市(咸阳秦都区福园巷子店)","生活服务;生活服务场所;生活服务场所","070000","","接受"],
@@ -115,14 +164,15 @@ test("明确的面馆、足浴和生鲜超市分类直接排除，普通购物�
   {brand:"好想来",name:"好想来(中心店)",type:"餐饮服务;中餐厅;中餐厅",tag:"面馆"},
   {brand:"好想来",name:"好想来(中心店)",type:"购物服务",tag:"足疗"},
   {brand:"老婆大人",name:"老婆大人(中心店)",type:"购物服务",tag:"生鲜超市"},
- ])assert.equal(assessBrandStore(row.brand,{...row,id:"B"}).decision,"排除",`具体非目标标签优先：${row.tag}`);
- assert.equal(assessBrandStore("来优品",{id:"B",name:"来优品零食(泉山湖店)",type:"购物服务;综合市场;蔬菜市场|购物服务;专卖店;专营店",tag:"零食;零食"}).decision,"待核实","明确零食标签与蔬菜市场分类冲突时保留人工核验");
+ ])assert.equal(assessBrandStore(row.brand,{...row,id:"B"}).decision,row.tag==="足疗"?"待核实":"排除",`具体非目标标签优先：${row.tag}`);
+ assert.equal(assessBrandStore("来优品",{id:"B",name:"来优品零食(泉山湖店)",type:"购物服务;综合市场;蔬菜市场|购物服务;专卖店;专营店",tag:"零食;零食"}).decision,"接受","正常品牌分店名称与明确零食标签可覆盖旧分类");
  assert.equal(assessBrandStore("好想来",{id:"B",name:"好想来(中心店)",type:"购物服务;购物相关场所"}).decision,"接受");
  assert.equal(assessBrandStore("好想来",{id:"B",name:"好想来(中心店)",type:"购物服务;超级市场;综合超市"}).decision,"接受");
 });
 test("8家已确认零食有鸣超市和分店餐馆、公寓地标不误判",()=>{
  for(const branch of ["苍溪城郊中学店","苍溪县汉水秀城店","苍溪元坝镇店","东城转盘店","东溪县店","红滨路店","江南半岛店","龙王沟店","公寓店","幸福蛋糕店旁店"]){
-  assert.equal(assessBrandStore("零食有鸣",{id:"B",name:`零食有鸣批发超市(${branch})`,typecode:"060000",tag:"日杂店"}).decision,"接受",branch);
+  assert.equal(assessBrandStore("零食有鸣",{id:"B",name:`零食有鸣批发超市(${branch})`,typecode:"060000",tag:"超市"}).decision,"接受",branch);
+  assert.equal(assessBrandStore("零食有鸣",{id:"B",name:`零食有鸣批发超市(${branch})`,typecode:"060000",tag:"日杂店"}).decision,"排除",`最新日杂店排除规则优先：${branch}`);
  }
 });
 test("人工确认名称不能绕过标签门槛，黑名单优先，无ID仍待核验",()=>{

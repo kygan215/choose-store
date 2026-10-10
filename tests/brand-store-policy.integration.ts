@@ -7,6 +7,10 @@ import { assessBrandStore, BRAND_IDENTITIES } from "../shared/brand-store-policy
 import { brandPolicyMigrationSql } from "../server/brand-store-policy-sql.js";
 import { listBrandStores, saveDiscoveredStores, storeFilterSql } from "../server/brand-library.js";
 import { reviewAilingshiPoi } from "../server/ailingshi-review.js";
+import { brandNameFormatFixtures } from "./brand-name-format-fixtures.js";
+import { relatedEvidenceFixtures } from "./brand-related-evidence-fixtures.js";
+import { excludedLabelFixtures } from "./brand-excluded-label-fixtures.js";
+import { hxlRetailFixtures } from "./hxl-retail-fixtures.js";
 after(()=>pool.end());
 
 test("统一品牌规则：SQL与应用一致、候选保存、人工名单、默认统计、分页、租户隔离",async()=>{
@@ -24,6 +28,10 @@ test("统一品牌规则：SQL与应用一致、候选保存、人工名单、�
     const row={brand,name,id:`RULE-${++id}`,address:"测试地址",...evidence};fixtures.push(row);
    }
   for(const row of [
+   {brand:"老婆大人",name:"老婆大人中昌路店",type:"购物服务;专卖店;儿童用品店",typecode:"061207",tag:"零食;零食"},
+   {brand:"好想来",name:"古现好想来零食店",type:"购物服务;专卖店;专营店",typecode:"061200",tag:"零食;零食"},
+   {brand:"爱零食",name:"爱零食新世界店(东云路店)",type:"购物服务;购物相关场所;购物相关场所",typecode:"060000",tag:"零食;零食"},
+   {brand:"零食很忙",name:"零食很忙河底街",type:"购物服务;专卖店;专营店",typecode:"061200",tag:"零食;零食"},
    {brand:"好想来",name:"好想来肉浇面",type:"餐饮服务;中餐厅;中餐厅",typecode:"050100",tag:"面馆;面馆"},
    {brand:"好想来",name:"好想来足道",type:"生活服务;洗浴推拿场所;洗浴推拿场所",typecode:"071400",tag:"足疗;足疗"},
    {brand:"老婆大人",name:"老婆大人生鲜超市",type:"购物服务;专卖店;专营店",typecode:"061200",tag:"生鲜超市;生鲜超市"},
@@ -67,10 +75,29 @@ test("统一品牌规则：SQL与应用一致、候选保存、人工名单、�
    {brand:"好想来",name:"好想来(中心店)",type:"餐饮服务;中餐厅;中餐厅",typecode:"050100",tag:"面馆;零食"},
    {brand:"好想来",name:"好想来品牌零食(凯升公馆店)(装修中)",type:"购物服务;专卖店;专营店",typecode:"061200",tag:"零食;零食"},
   ])fixtures.push({...row,id:`RULE-${++id}`,address:"测试地址"});
+  for (const [brand,name,type,tag,expected] of relatedEvidenceFixtures) {
+   const row={brand,name,type,tag,id:`RELATED-${++id}`,address:"测试地址"};
+   assert.equal(assessBrandStore(brand,row).decision,expected,name);
+   fixtures.push(row);
+  }
+  for (const {brand,expected,...evidence} of excludedLabelFixtures) {
+   const row={brand,...evidence,id:`LABEL-${++id}`,address:"测试地址"};
+   assert.equal(assessBrandStore(brand,row).decision,expected,JSON.stringify(row));
+   fixtures.push(row);
+  }
+  for(const {expected,...evidence} of hxlRetailFixtures){
+   const row={brand:"好想来",...evidence,id:`HXL-${++id}`,address:"测试地址"};
+   assert.equal(assessBrandStore(row.brand,row).decision,expected,row.name);
+   fixtures.push(row);
+  }
   for(const row of fixtures){
    const expected=assessBrandStore(row.brand,row);
    const result=(await client.query("SELECT brand_policy_decision($1,$2,$3,'',$4,$5,$6) decision,brand_policy_reason($1,$2,$3,'',$4,$5,$6) reason",[row.brand,row.name,row.id,row.type||"",row.typecode||"",JSON.stringify(row)])).rows[0];
    assert.equal(result.decision,expected.decision,JSON.stringify(row));assert.equal(result.reason,expected.decision_reason);
+  }
+  for (const [brand, name, tag, expected] of brandNameFormatFixtures) {
+   const result = (await client.query("SELECT brand_policy_decision($1,$2,'FORMAT','','购物服务;专卖店;专营店','061200',$3) decision", [brand, name, JSON.stringify({tag})])).rows[0];
+   assert.equal(result.decision, expected, name);
   }
   const runQuery=(sql:string,values?:unknown[])=>client.query(sql,values);
   await client.query("CREATE TEMP SEQUENCE policy_ids START 1");
@@ -84,21 +111,29 @@ test("统一品牌规则：SQL与应用一致、候选保存、人工名单、�
   const connection={query:(sql:string,v?:unknown[])=>client.query(sql==="BEGIN"?"SAVEPOINT review":sql==="COMMIT"?"RELEASE SAVEPOINT review":sql==="ROLLBACK"?"ROLLBACK TO SAVEPOINT review":sql,v),release:()=>{}} as PoolClient;
   const admin={id:1,tenantId:1,role:"admin"} as Parameters<typeof reviewAilingshiPoi>[0];
   const pending=fixtures.find(r=>r.brand==="糖巢"&&r.name.includes("·")&&r.type==="购物服务"&&!r.business)!;
+  // This format is now accepted automatically. Use an unrecognized prefix to
+  // exercise the manual-review path without depending on the retired rule.
+  pending.name="未识别前缀糖巢·特卖";
+  await client.query("UPDATE brand_stores SET amap_name=$1 WHERE amap_poi_id=$2",[pending.name,pending.id]);
+  const reviewedCount=count-1;
   await assert.rejects(reviewAilingshiPoi({...admin,role:"member"},{poi_id:pending.id,decision:"accept",reason:"人工核对"},"",async()=>connection),/管理员/);
   await assert.rejects(reviewAilingshiPoi({...admin,tenantId:2},{poi_id:pending.id,decision:"accept",reason:"人工核对"},"",async()=>connection),/不存在/);
   await reviewAilingshiPoi(admin,{poi_id:pending.id,decision:"accept",reason:"人工核对"},"",async()=>connection);
-  assert.equal((await listBrandStores(1,{},runQuery)).total,count+1);
+  assert.equal((await listBrandStores(1,{},runQuery)).total,reviewedCount+1);
   await saveDiscoveredStores(1,null,"糖巢","测试省","测试市",[{...pending,location:[114,30]}],false,runQuery);
-  assert.equal((await listBrandStores(1,{},runQuery)).total,count+1,"重新检索保持白名单且不重复");
+  assert.equal((await listBrandStores(1,{},runQuery)).total,reviewedCount+1,"重新检索保持白名单且不重复");
   await reviewAilingshiPoi(admin,{poi_id:pending.id,decision:"reset",reason:"恢复自动规则"},"",async()=>connection);
-  assert.equal((await listBrandStores(1,{},runQuery)).total,count);
+  assert.equal((await listBrandStores(1,{},runQuery)).total,reviewedCount);
   await reviewAilingshiPoi(admin,{poi_id:pending.id,decision:"exclude",reason:"人工排除"},"",async()=>connection);
   assert.equal((await client.query("SELECT name_decision FROM brand_stores WHERE amap_poi_id=$1",[pending.id])).rows[0].name_decision,"排除");
   const noTags=fixtures.find(r=>r.brand==="爱零食"&&r.name==="爱零食"&&!r.type&&!r.typecode&&!r.business)!;
   await reviewAilingshiPoi(admin,{poi_id:noTags.id,decision:"accept",reason:"仅确认品牌"},"",async()=>connection);
   assert.equal((await client.query("SELECT name_decision FROM brand_stores WHERE amap_poi_id=$1",[noTags.id])).rows[0].name_decision,"待核实","白名单不能绕过标签证据");
   assert.equal(Number((await client.query("SELECT count(*) n FROM audit_logs WHERE action='review_brand_poi'")).rows[0].n),4);
-  await client.query("INSERT INTO brand_stores(tenant_id,brand_name,source_uid,amap_poi_id,amap_name,poi_type,longitude,latitude) SELECT 3,'糖巢','PERF-'||n,'PERF-'||n,'糖巢('||n||'店)',CASE WHEN n%10=0 THEN '' ELSE '购物服务' END,114,30 FROM generate_series(1,60000) n");
+  // Rule semantics are covered above. Seed pagination-only rows directly in
+  // the temporary table instead of recomputing four generated columns 60k times.
+  await client.query("ALTER TABLE brand_stores ALTER COLUMN name_decision DROP EXPRESSION, ALTER COLUMN name_decision_reason DROP EXPRESSION, ALTER COLUMN library_visible DROP EXPRESSION, ALTER COLUMN needs_review DROP EXPRESSION");
+  await client.query("INSERT INTO brand_stores(tenant_id,brand_name,source_uid,amap_poi_id,amap_name,poi_type,longitude,latitude,name_decision,library_visible,needs_review) SELECT 3,'糖巢','PERF-'||n,'PERF-'||n,'糖巢('||n||'店)',CASE WHEN n%10=0 THEN '' ELSE '购物服务' END,114,30,CASE WHEN n%10=0 THEN '待核实' ELSE '接受' END,n%10<>0,n%10=0 FROM generate_series(1,60000) n");
   await client.query("ANALYZE brand_stores");
   for(const filter of [{page:1},{page:58},{page:1000},{page:1,review_status:"pending"},{page:58,review_status:"pending"}]){
    const start=performance.now(),result=await listBrandStores(3,filter,runQuery),ms=Math.round(performance.now()-start);
