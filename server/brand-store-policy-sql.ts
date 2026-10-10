@@ -1,4 +1,4 @@
-import { BRAND_IDENTITIES, brandBareBranchPattern, brandLocationPrimaryPattern, brandNamePattern, CAKE_TAG, CONFLICT_TAG, GENERIC_CATERING_TYPE, INACTIVE_STATUS, LOCATION_BRANCH_BLOCK, NON_TARGET_CATEGORY_TAG, POLICY_REASONS as R, RETAIL_TAG, SHOPPING_TYPE_FOR_CONFLICT, SIMILAR_NAME, SOFT_UNRELATED_NAME, UNRELATED_NAME, WAREHOUSE_BRANCH } from "../shared/brand-store-policy.js";
+import { BRAND_IDENTITIES, brandBareBranchPattern, brandLocationPrimaryPattern, brandNamePattern, CAKE_TAG, CONFLICT_TAG, GENERIC_CATERING_TYPE, HARD_NON_RETAIL_TAG, INACTIVE_STATUS, LOCATION_BRANCH_BLOCK, NON_TARGET_CATEGORY_TAG, POLICY_REASONS as R, RETAIL_TAG, SHOPPING_TYPE_FOR_CONFLICT, SIMILAR_NAME, SOFT_UNRELATED_NAME, UNRELATED_NAME, WAREHOUSE_BRANCH } from "../shared/brand-store-policy.js";
 import { snackRetailSql } from "./snack-retail.js";
 const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
 const known = `brand_name IN (${Object.keys(BRAND_IDENTITIES).map(q).join(",")})`;
@@ -6,9 +6,11 @@ const genericCatering = `(pt LIKE '%' || ${q(GENERIC_CATERING_TYPE)} || '%' AND 
 const cakeWithRetailProof = `(tags ~ ${q(CAKE_TAG)} AND business_tags !~ ${q(CAKE_TAG)} AND tags !~ ${q(NON_TARGET_CATEGORY_TAG)} AND pt LIKE '%糕饼店%' AND NOT EXISTS (SELECT 1 FROM unnest(string_to_array(pt,'|')) item WHERE item NOT LIKE '%糕饼店%' AND item !~ ${q(`^${SHOPPING_TYPE_FOR_CONFLICT}$`)}))`;
 const resolvedConflict = `(business_snack AND ((${genericCatering} AND tags !~ ${q(NON_TARGET_CATEGORY_TAG)} AND tags !~ ${q(CAKE_TAG)}) OR ${cakeWithRetailProof}))`;
 const shoppingCategory = `(pt<>'' AND NOT EXISTS (SELECT 1 FROM unnest(string_to_array(pt,'|')) item WHERE item !~ ${q(`^${SHOPPING_TYPE_FOR_CONFLICT}$`)}))`;
+const strictNameSql = `(CASE brand ${Object.keys(BRAND_IDENTITIES).map(brand=>`WHEN ${q(brand)} THEN n ~ ${q(brandNamePattern(brand))}`).join(" ")} ELSE FALSE END)`;
+const chainNameSql = `(${strictNameSql} AND n ~ ${q("(\\([^()]+店\\)|[-－][^()]+店|店)$")} AND split_part(n,'(',1) !~ ${q(SOFT_UNRELATED_NAME)} AND business_tags !~ ${q(CAKE_TAG)} AND (tags !~ ${q(NON_TARGET_CATEGORY_TAG)} OR (pt LIKE '%中餐厅%' AND business_snack)) AND (business_snack OR retail OR split_part(n,'(',1) ~ '品牌零食|零食乐园|量贩零食|省钱超市|批发超市|零食店|零食超市|硬折扣超市' OR (pt='生活服务;生活服务场所;生活服务场所' AND c ~ '(^|[|;,])070000([|;,]|$)')))`;
 const nameMatchSql = Object.keys(BRAND_IDENTITIES).map(brand => {
  const strict = `n ~ ${q(brandNamePattern(brand))}`;
- const soft = brand === "爱零食" ? "" : ` OR (business_snack AND ${shoppingCategory} AND split_part(n,'(',1) !~ ${q(SOFT_UNRELATED_NAME)} AND n ~ ${q(brandBareBranchPattern(brand))}) OR (business_snack AND ${shoppingCategory} AND n ~ '^[^()]+\\([^()]+\\)$' AND split_part(n,'(',1) ~ ${q(brandLocationPrimaryPattern(brand))} AND split_part(split_part(n,'(',2),')',1) !~ ${q(LOCATION_BRANCH_BLOCK)})`;
+ const soft = ` OR (business_snack AND ${shoppingCategory} AND split_part(n,'(',1) !~ ${q(SOFT_UNRELATED_NAME)} AND n ~ ${q(brandBareBranchPattern(brand))}) OR (business_snack AND ${shoppingCategory} AND n ~ '^[^()]+\\([^()]+\\)$' AND split_part(n,'(',1) ~ ${q(brandLocationPrimaryPattern(brand))} AND split_part(split_part(n,'(',2),')',1) !~ ${q(LOCATION_BRANCH_BLOCK)})`;
  return `WHEN ${q(brand)} THEN (${strict}${soft})`;
 }).join("\n");
 export const brandPolicyFunctionsSql = `
@@ -27,11 +29,13 @@ LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
  WHEN n ~ ${q(INACTIVE_STATUS)} THEN ${q(R.inactive)}
  WHEN n ~ ${q(WAREHOUSE_BRANCH)} THEN ${q(R.warehouse)}
  WHEN split_part(n,'(',1) ~ ${q(UNRELATED_NAME)} THEN ${q(R.unrelated)}
- WHEN brand='爱零食' AND manual<>'accept' AND n ~ ${q(SIMILAR_NAME)} THEN ${q(R.similar)}
+ WHEN (brand='爱零食' AND n ~ ${q(SIMILAR_NAME)}) OR (brand='好想来' AND n ~ '^好像来') THEN ${q(R.similar)}
+ WHEN tags ~ ${q(HARD_NON_RETAIL_TAG)} THEN ${q(R.hardCategory)}
  WHEN tags ~ ${q(CAKE_TAG)} AND NOT snack_evidence THEN ${q(R.cake)}
  WHEN tags ~ ${q(NON_TARGET_CATEGORY_TAG)} AND NOT snack_evidence THEN ${q(R.category)}
  WHEN btrim(COALESCE(poi_id,''))='' THEN ${q(R.noId)}
  WHEN manual<>'accept' AND NOT (CASE brand ${nameMatchSql} ELSE FALSE END) THEN ${q(R.name)}
+ WHEN ${chainNameSql} THEN ${q(R.chain)}
  WHEN (tags ~ ${q(`${CAKE_TAG}|${NON_TARGET_CATEGORY_TAG}|${CONFLICT_TAG}`)} OR c ~ '(^|[|;,])(?!06[0-9]{4}([|;,]|$)|070000([|;,]|$))[0-9]{6}([|;,]|$)') AND NOT ${resolvedConflict} THEN ${q(R.conflict)}
  WHEN NOT retail THEN ${q(R.tags)}
  WHEN manual='accept' THEN ${q(R.manual)} ELSE ${q(R.accepted)} END FROM flags
@@ -39,8 +43,8 @@ $$;
 CREATE OR REPLACE FUNCTION brand_policy_decision(brand text, name text, poi_id text, manual text, poi_type text, codes text, raw jsonb) RETURNS text
 LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
  SELECT CASE brand_policy_reason(brand,name,poi_id,manual,poi_type,codes,raw)
- WHEN ${q(R.accepted)} THEN '接受' WHEN ${q(R.manual)} THEN '接受'
- ${[R.blacklist,R.inactive,R.warehouse,R.unrelated,R.similar,R.cake,R.category].map(r=>`WHEN ${q(r)} THEN '排除'`).join(" ")}
+ WHEN ${q(R.accepted)} THEN '接受' WHEN ${q(R.manual)} THEN '接受' WHEN ${q(R.chain)} THEN '接受'
+ ${[R.blacklist,R.inactive,R.warehouse,R.unrelated,R.similar,R.hardCategory,R.cake,R.category].map(r=>`WHEN ${q(r)} THEN '排除'`).join(" ")}
  ELSE '待核实' END
 $$;
 `;
