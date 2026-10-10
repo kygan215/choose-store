@@ -34,4 +34,6 @@ export const hxlRetailFixtures = [
   {name:"好想来零食小镇(春晖苑店)",type:"购物服务",tag:"零食",expected:"接受"},
   {name:"好想来零食屋",type:"购物服务",tag:"零食",expected:"接受"},
   {name:"好想来露",type:"购物服务",expected:"待核实"},
+  {name:"好想来零食乐园 空港澜庭店",tag:"零食",expected:"接受"},
+  {name:"好想来零食乐园湖西职业教育园店",tag:"零食",expected:"接受"},
 ] as const;
