@@ -8,12 +8,12 @@ type RemovedPage={rows:RemovedStore[];total:number;page:number;pages:number};
 type Request=<T>(path:string,init?:RequestInit)=>Promise<T>;
 type Target={ids:number[];name?:string;action:"delete"|"restore"};
 
-export function BrandPoiReviewDialog({name,poiId,action,onClose,onSubmit}:{name:string;poiId:string;action:"accept"|"exclude"|"reset";onClose:()=>void;onSubmit:(reason:string)=>Promise<void>}){
+export function BrandPoiReviewDialog({name,poiId,count,action,onClose,onSubmit}:{name:string;poiId:string;count?:number;action:"accept"|"exclude"|"reset";onClose:()=>void;onSubmit:(reason:string)=>Promise<void>}){
   const ref=useRef<HTMLDialogElement>(null),[reason,setReason]=useState(""),[busy,setBusy]=useState(false),[error,setError]=useState("");
   useEffect(()=>{const dialog=ref.current;dialog?.showModal();return()=>dialog?.close()},[]);
   const label=action==="accept"?"确认纳入":action==="exclude"?"确认排除":"恢复自动规则";
   return <dialog ref={ref} className="brand-removal-dialog" aria-label="确认门店名单操作" onCancel={e=>{e.preventDefault();if(!busy)onClose()}}><form onSubmit={async e=>{e.preventDefault();if(busy)return;setBusy(true);setError("");try{await onSubmit(reason)}catch(error){setError(error instanceof Error?error.message:"保存失败")}finally{setBusy(false)}}}>
-    <h2>{label}</h2><p>{name}<br/>POI ID：{poiId}</p><p>仅针对这个 POI ID 保存白名单或黑名单，后续查询刷新沿用，可恢复自动规则。人工确认品牌名称后，仍须满足零食／超市／购物分类要求；具体的面馆、足浴、生鲜超市等非目标分类不能通过白名单纳入。</p>
+    <h2>{count?`批量${action==="accept"?"纳入":"排除"} ${count} 家门店`:label}</h2><p>{count?`已勾选 ${count} 家门店（包含其他页的选择）。`:name}{!count&&<><br/>POI ID：{poiId}</>}</p><p>按 POI ID 保存人工名单，后续查询刷新沿用；同一 POI 的关联记录同步生效，可逐条恢复自动规则。批量纳入沿用单条纳入规则，停业、明确无关业态或证据不足等记录可能仍被排除或保留待核验，处理后会显示实际结果。每次最多处理 5000 家。</p>
     <label>核实依据<textarea autoFocus required aria-label="核实依据" value={reason} maxLength={500} onChange={e=>setReason(e.target.value)}/></label>
     {error&&<p role="alert">{error}</p>}<div className="brand-removal-actions"><button type="button" disabled={busy} onClick={onClose}>取消</button><button type="submit" disabled={busy||!reason.trim()}>{busy?"保存中…":"确认保存"}</button></div>
   </form></dialog>;
