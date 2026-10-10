@@ -74,7 +74,7 @@ test("品牌门店库提供全国入口和完整省级入口",()=>{
 
 test("首批零食系统品牌库包含需求确认的主要品牌",()=>{
   const names=DEFAULT_BRANDS.map(item=>item.name);
-  for(const expected of ["零食很忙","零食有鸣","赵一鸣零食","好想来","爱零食","来优品","戴永红","糖巢","老婆大人","陆小馋","吖嘀吖嘀","来伊份"])assert.ok(names.includes(expected),expected);
+  for(const expected of ["零食很忙","零食有鸣","赵一鸣零食","好想来","爱零食","来优品","戴永红","糖巢","老婆大人","陆小馋","吖嘀吖嘀","来伊份","养馋记"])assert.ok(names.includes(expected),expected);
   assert.equal(names.includes("好想来零食"),false);
   assert.ok(DEFAULT_BRANDS.find(item=>item.name==="好想来")?.aliases.includes("好像来"));
 });

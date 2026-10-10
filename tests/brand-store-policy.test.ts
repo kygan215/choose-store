@@ -7,6 +7,28 @@ import { relatedEvidenceFixtures } from "./brand-related-evidence-fixtures.js";
 import { excludedLabelFixtures } from "./brand-excluded-label-fixtures.js";
 import { hxlRetailFixtures } from "./hxl-retail-fixtures.js";
 
+test("养馋记使用确认的关键词、统一筛选、POI去重及人工名单",async()=>{
+ const rows=[
+  {id:"YCJ-1",name:"养馋记（中心店）",tag:"零食"},
+  {id:"YCJ-2",name:"养馋记超市(广场店)",type:"购物服务"},
+  {id:"YCJ-3",name:"养馋记(河西店)"},
+  {id:"YCJ-4",name:"养馋记蛋糕店",type:"购物服务"},
+  {id:"YCJ-5",name:"养馋记(配送仓库)",tag:"零食"},
+  {id:"YCJ-6",name:"养馋记(中心店)(装修中)",tag:"零食"},
+ ].map(row=>({...row,location:"114,30"}));
+ const keywords:string[]=[];
+ const request=async(_path:string,params:Record<string,string|number|boolean>)=>{keywords.push(String(params.keywords));return {pois:[...rows,rows[0]]}};
+ const result=await discoverBrandStores(request,"养馋记","测试市","测试区");
+ assert.deepEqual(keywords,["养馋记"]);
+ assert.deepEqual(result.stores.map(row=>row.id).sort(),["YCJ-1","YCJ-2"]);
+ assert.equal(result.assessments?.length,6);
+ assert.equal(result.assessments?.find(row=>row.id==="YCJ-3")?.decision,"待核实");
+ for(const id of ["YCJ-4","YCJ-5","YCJ-6"])assert.equal(result.assessments?.find(row=>row.id===id)?.decision,"排除",id);
+ const reviewed=await discoverBrandStores(request,"养馋记","测试市","测试区",{overrides:{"YCJ-1":"exclude"}});
+ assert.deepEqual(reviewed.stores.map(row=>row.id),["YCJ-2"]);
+ assert.equal(assessBrandStore("养馋记",rows[2],"accept").decision,"待核实");
+});
+
 test("好想来相关零售餐饮证据放行前缀和非规范分店，保留排除边界",()=>{
   for(const {expected,...row} of hxlRetailFixtures){
     assert.equal(assessBrandStore("好想来",{id:"HXL",...row}).decision,expected,row.name);
@@ -50,7 +72,7 @@ test("用户确认的名称容错、便利待核验和无关业态优先排除",
   }
 });
 
-test("13个品牌统一接受零食、超市、购物分类，裸品牌名称仍须外部证据",()=>{
+test("预设品牌统一接受零食、超市、购物分类，裸品牌名称仍须外部证据",()=>{
   for(const brand of Object.keys(BRAND_IDENTITIES))for(const name of [brand,`${brand}(中心店)`,`${brand}超市（中心店）`,`${brand}便利店(中心店)`]){
     for(const extra of [{type:"购物服务"},{typecode:"060200"},{business:{keytag:"零食"}},{tag:"综合超市"}])
       assert.equal(assessBrandStore(brand,{name,id:"B",...extra}).decision,"接受",name);
