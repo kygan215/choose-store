@@ -12,6 +12,8 @@ export const BRAND_IDENTITIES: Record<string, string[]> = {
 export const RETAIL_SUFFIX = "零食|零食店|零食铺|零食超市|零食省钱超市|量贩零食|量贩零食店|量贩零食超市|零食量贩|零食量贩店|零食专卖店|新一代国民零食|休闲食品|超市|批发超市|硬折扣超市|省钱超市|折扣超市|购物超市|生活超市|便利店|便利超市|量贩便利店";
 export const UNRELATED_NAME = "蛋糕|糕饼|西饼|酱卤|卤味|卤菜|熟食|餐厅|餐馆|饭店|小吃|快餐|火锅|烧烤|麻辣烫|炸鸡|汉堡|奶茶|咖啡|面馆|浇面|米粉|足道|足疗|足浴|按摩|推拿|生鲜超市|酒店|宾馆|药房|药店|服装|理发|美容|公司$|仓库|配送中心|仓配中心|供应链中心|办事处|甜品|烘焙|民宿|公寓$|外卖柜|网吧|KTV|停车场|充电站|动物医院|物流基地|面试中心|菜鸟驿站|铁锅炖|农家饭馆|钓鱼|垂钓|钓场|台球(俱乐部|店)?$|棋牌(俱乐部|室)?$|洗衣(店)?$|果业$|眼镜店$";
 export const RETAIL_TAG = "零食|超市|购物";
+export const CONFIRMED_NON_CHAIN_NAME = "东来优品|糖巢手作";
+export const CLEAR_UNRELATED_BUSINESS = "窗帘|窗饰|家电|成人用品|成人优品|维修站|维修服务|鸭脖|酱鸭|喜铺|喜礼|婚品|洗车|采摘园|草莓园|烙锅|羊肉粉|粉汤";
 export const CAKE_TAG = "蛋糕|糕饼|西饼|烘焙|甜品";
 // Concrete non-target POI labels override broad shopping evidence. Generic major
 // categories stay reviewable because Amap can misclassify genuine brand stores.
@@ -47,6 +49,8 @@ export const POLICY_REASONS = {
   category: "高德具体分类或标签明确为餐饮、足浴、生鲜等非目标业态",
   hardCategory: "高德具体分类或标签明确为棋牌、垂钓、面馆、足浴或生鲜等非目标业态",
   noId: "缺少 POI ID，待核验", name: "名称未匹配品牌完整结构，待核验",
+  noBrand: "名称主体没有目标品牌依据；其他品牌、普通店名或仅地标命中，不按该品牌收录",
+  nonChain: "名称主体为用户确认的非目标连锁名称",
   convenience: "零食有鸣便利名称按用户要求待核验",
   related: "品牌主体明确，购物／餐饮／便利店等相关证据通过初筛，未验证品牌归属",
   extreme: "名称疑似品牌门店，但分类或标签明显不相关，待核验",
@@ -60,6 +64,8 @@ export const POLICY_REASONS = {
   manual: "按 POI ID 人工确认名称，零食／超市／购物证据通过初筛",
 } as const;
 export const isPolicyBrand = (brand: string) => Object.hasOwn(BRAND_IDENTITIES, brand);
+// 赵一鸣 is an already-supported screening alias, not an added search term.
+export const brandIdentityEvidenceNames = (brand: string) => brand === "赵一鸣零食" ? [...BRAND_IDENTITIES[brand], "赵一鸣"] : BRAND_IDENTITIES[brand] || [brand];
 const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 // Repairs only mechanical formatting; original_name remains untouched. Keep
 // these ordered replacements shared with PostgreSQL to avoid divergent results.
@@ -195,9 +201,14 @@ export function assessBrandStore(brand: string, row: BrandPolicyPoi, override: A
   if (poi_id && override === "exclude") { decision = "排除"; decision_reason = POLICY_REASONS.blacklist; }
   else if (new RegExp(INACTIVE_STATUS).test(sourceName)) { decision = "排除"; decision_reason = POLICY_REASONS.inactive; }
   else if (new RegExp(WAREHOUSE_BRANCH).test(normalized_name)) { decision = "排除"; decision_reason = POLICY_REASONS.warehouse; }
-  else if (new RegExp(`${UNRELATED_NAME}|${EXPLICIT_UNRELATED}`).test(primary) || otherShopLandmark || new RegExp(NON_STORE_BRANCH).test(normalized_name) || new RegExp(NON_STORE_TAIL).test(sourceName)) { decision = "排除"; decision_reason = POLICY_REASONS.unrelated; }
+  else if (new RegExp(`${UNRELATED_NAME}|${EXPLICIT_UNRELATED}|${CLEAR_UNRELATED_BUSINESS}`).test(primary) || otherShopLandmark || new RegExp(NON_STORE_BRANCH).test(normalized_name) || new RegExp(NON_STORE_TAIL).test(sourceName)) { decision = "排除"; decision_reason = POLICY_REASONS.unrelated; }
   else if ((brand === "爱零食" && new RegExp(SIMILAR_NAME).test(primary)) || (brand === "好想来" && /^好像来/.test(normalized_name))) { decision = "排除"; decision_reason = POLICY_REASONS.similar; }
   else if (brand === "好想来" && new RegExp(HXL_NON_BRAND_NAME).test(primary)) { decision = "排除"; decision_reason = POLICY_REASONS.hxlNonBrand; }
+  else if (new RegExp(CONFIRMED_NON_CHAIN_NAME).test(primary)) { decision = "排除"; decision_reason = POLICY_REASONS.nonChain; }
+  // Generic shopping/snack evidence is not brand identity. Keep unusual names
+  // with the actual brand in their primary name reviewable, not fuzzy hits or
+  // landmarks. Explicit POI-ID confirmation can resolve an unrecognized alias.
+  else if (override !== "accept" && primary.trim() && !brandIdentityEvidenceNames(brand).some(name => primary.includes(name))) { decision = "排除"; decision_reason = POLICY_REASONS.noBrand; }
   else if (new RegExp(EXCLUDED_STORE_LABEL.replaceAll("[[:space:]]", "\\s")).test(exclusionLabels)) { decision = "排除"; decision_reason = POLICY_REASONS.excludedLabel; }
   else if (relatedName && extremeEvidence) decision_reason = POLICY_REASONS.extreme;
   else if (new RegExp(HARD_NON_RETAIL_TAG).test(tags)) { decision = "排除"; decision_reason = POLICY_REASONS.hardCategory; }

@@ -6,6 +6,29 @@ import { brandNameFormatFixtures } from "./brand-name-format-fixtures.js";
 import { relatedEvidenceFixtures } from "./brand-related-evidence-fixtures.js";
 import { excludedLabelFixtures } from "./brand-excluded-label-fixtures.js";
 import { hxlRetailFixtures } from "./hxl-retail-fixtures.js";
+import {identityRejectionFixtures} from "./brand-identity-rejection-fixtures.js";
+
+test("无目标品牌主体的召回直接排除，购物或零食标签不能替代品牌身份",()=>{
+ for(const {brand,...row} of identityRejectionFixtures){
+  assert.equal(assessBrandStore(brand,{id:"UNRELATED",...row}).decision,"排除",row.name);
+ }
+});
+
+test("真实搜索调用路径保留排除审计，只有目标品牌门店进入接受列表",async()=>{
+ const hits=identityRejectionFixtures.filter(row=>row.brand==="来优品").map((row,index)=>({...row,id:`NO-${index}`,location:"114,30"}));
+ const good={id:"YES",name:"来优品(中心店)",tag:"零食",location:"114,30"};
+ const result=await discoverBrandStores(async()=>({pois:[...hits,good]}),"来优品","测试市","测试区");
+ assert.deepEqual(result.stores.map(row=>row.id),["YES"]);
+ assert.ok(result.assessments?.filter(row=>row.id!=="YES").every(row=>row.decision==="排除"));
+});
+
+test("正常主体地标与不规范分店不因无品牌排除规则误删",()=>{
+ for(const name of ["来优品(名创优品旁店)","来优品(绝味鸭脖旁店)","来优品(居家窗帘旁店)"]){
+  assert.equal(assessBrandStore("来优品",{id:"GOOD",name,tag:"零食"}).decision,"接受",name);
+ }
+ assert.equal(assessBrandStore("糖巢",{id:"ODD",name:"常平糖巢零食店",tag:"零食"}).decision,"待核实");
+ assert.equal(assessBrandStore("来优品",{id:"MISSING",name:"来优品(中心店)"}).decision,"待核实");
+});
 
 test("养馋记使用确认的关键词、统一筛选、POI去重及人工名单",async()=>{
  const rows=[

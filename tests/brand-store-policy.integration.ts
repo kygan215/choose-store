@@ -11,6 +11,7 @@ import { brandNameFormatFixtures } from "./brand-name-format-fixtures.js";
 import { relatedEvidenceFixtures } from "./brand-related-evidence-fixtures.js";
 import { excludedLabelFixtures } from "./brand-excluded-label-fixtures.js";
 import { hxlRetailFixtures } from "./hxl-retail-fixtures.js";
+import {identityRejectionFixtures} from "./brand-identity-rejection-fixtures.js";
 after(()=>pool.end());
 
 test("统一品牌规则：SQL与应用一致、候选保存、人工名单、默认统计、分页、租户隔离",async()=>{
@@ -95,6 +96,11 @@ test("统一品牌规则：SQL与应用一致、候选保存、人工名单、�
    const result=(await client.query("SELECT brand_policy_decision($1,$2,$3,'',$4,$5,$6) decision,brand_policy_reason($1,$2,$3,'',$4,$5,$6) reason",[row.brand,row.name,row.id,row.type||"",row.typecode||"",JSON.stringify(row)])).rows[0];
    assert.equal(result.decision,expected.decision,JSON.stringify(row));assert.equal(result.reason,expected.decision_reason);
   }
+  for(const {brand,...row} of identityRejectionFixtures)for(const manual of ["","accept","exclude"] as const){
+   const expected=assessBrandStore(brand,{id:"IDENTITY",...row},manual);
+   const result=(await client.query("SELECT brand_policy_decision($1,$2,'IDENTITY',$3,$4,'',$5) decision,brand_policy_reason($1,$2,'IDENTITY',$3,$4,'',$5) reason",[brand,row.name,manual,row.type||"",JSON.stringify(row)])).rows[0];
+   assert.equal(result.decision,expected.decision,row.name);assert.equal(result.reason,expected.decision_reason,row.name);
+  }
   for (const [brand, name, tag, expected] of brandNameFormatFixtures) {
    const result = (await client.query("SELECT brand_policy_decision($1,$2,'FORMAT','','购物服务;专卖店;专营店','061200',$3) decision", [brand, name, JSON.stringify({tag})])).rows[0];
    assert.equal(result.decision, expected, name);
@@ -130,6 +136,12 @@ test("统一品牌规则：SQL与应用一致、候选保存、人工名单、�
   await reviewAilingshiPoi(admin,{poi_id:noTags.id,decision:"accept",reason:"仅确认品牌"},"",async()=>connection);
   assert.equal((await client.query("SELECT name_decision FROM brand_stores WHERE amap_poi_id=$1",[noTags.id])).rows[0].name_decision,"待核实","白名单不能绕过标签证据");
   assert.equal(Number((await client.query("SELECT count(*) n FROM audit_logs WHERE action='review_brand_poi'")).rows[0].n),4);
+  // A fuzzy hit for another brand must never overwrite an accepted POI.
+  const correct={id:"CROSS-BRAND",name:"好想来零食乐园(测试店)",type:"购物服务",tag:"零食",location:[114,30]};
+  await saveDiscoveredStores(1,null,"好想来","测试省","测试市",[correct],false,runQuery);
+  await saveDiscoveredStores(1,null,"来优品","测试省","测试市",[correct],false,runQuery);
+  const protectedRow=(await client.query("SELECT brand_name,name_decision FROM brand_stores WHERE amap_poi_id='CROSS-BRAND'")).rows[0];
+  assert.equal(protectedRow.brand_name,"好想来");assert.equal(protectedRow.name_decision,"接受");
   // Rule semantics are covered above. Seed pagination-only rows directly in
   // the temporary table instead of recomputing four generated columns 60k times.
   await client.query("ALTER TABLE brand_stores ALTER COLUMN name_decision DROP EXPRESSION, ALTER COLUMN name_decision_reason DROP EXPRESSION, ALTER COLUMN library_visible DROP EXPRESSION, ALTER COLUMN needs_review DROP EXPRESSION");

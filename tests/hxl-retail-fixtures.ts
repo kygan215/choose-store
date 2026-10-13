@@ -19,7 +19,7 @@ export const hxlRetailFixtures = [
   {name:"兴隆好想来(南宁仓)",type:"购物服务",expected:"排除"},
   {name:"兴隆好想来",type:"购物服务",tag:"按摩",expected:"排除"},
   {name:"好想来体验馆",type:"购物服务",tag:"保健;桌游",expected:"待核实"},
-  {name:"其他店铺(好想来旁)",type:"购物服务",tag:"零食",expected:"待核实"},
+  {name:"其他店铺(好想来旁)",type:"购物服务",tag:"零食",expected:"排除"},
   {name:"好想来零食工厂(商丘团结路店)",expected:"待核实"},
   {name:"好想来(店)",type:"购物服务",expected:"待核实"},
   {name:"好想来(中心店)足浴",type:"购物服务",expected:"待核实"},
