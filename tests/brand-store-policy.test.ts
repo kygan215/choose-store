@@ -49,7 +49,7 @@ test("养馋记使用确认的关键词、统一筛选、POI去重及人工名�
  for(const id of ["YCJ-4","YCJ-5","YCJ-6"])assert.equal(result.assessments?.find(row=>row.id===id)?.decision,"排除",id);
  const reviewed=await discoverBrandStores(request,"养馋记","测试市","测试区",{overrides:{"YCJ-1":"exclude"}});
  assert.deepEqual(reviewed.stores.map(row=>row.id),["YCJ-2"]);
- assert.equal(assessBrandStore("养馋记",rows[2],"accept").decision,"待核实");
+ assert.equal(assessBrandStore("养馋记",rows[2],"accept").decision,"接受");
 });
 
 test("好想来相关零售餐饮证据放行前缀和非规范分店，保留排除边界",()=>{
@@ -63,7 +63,7 @@ test("好想来相关零售餐饮证据放行前缀和非规范分店，保留�
 test("好想来全食优选及七类明确标签排除，以商业标签优先且不匹配地标",()=>{
   for(const {brand,expected,...row} of excludedLabelFixtures){
     assert.equal(assessBrandStore(brand,{id:"LABEL",...row}).decision,expected,JSON.stringify(row));
-    if(expected==="排除")assert.equal(assessBrandStore(brand,{id:"LABEL",...row},"accept").decision,"排除");
+    if(expected==="排除")assert.equal(assessBrandStore(brand,{id:"LABEL",...row},"accept").decision,row.name.split("(")[0].includes("副食")?"排除":"接受","人工可纠正来源标签；明确副食品名称仍排除");
   }
   assert.ok(BRAND_IDENTITIES["好想来"].includes("好想来全食优选"));
 });
@@ -220,8 +220,8 @@ test("8家已确认零食有鸣超市和分店餐馆、公寓地标不误判",()
   assert.equal(assessBrandStore("零食有鸣",{id:"B",name:`零食有鸣批发超市(${branch})`,typecode:"060000",tag:"日杂店"}).decision,"排除",`最新日杂店排除规则优先：${branch}`);
  }
 });
-test("人工确认名称不能绕过标签门槛，黑名单优先，无ID仍待核验",()=>{
- assert.equal(assessBrandStore("糖巢",{id:"B",name:"糖巢·特卖"},"accept").decision,"待核实");
+test("人工核实纳入覆盖名称和标签疑点，黑名单优先，无ID仍待核验",()=>{
+ assert.equal(assessBrandStore("糖巢",{id:"B",name:"糖巢·特卖"},"accept").decision,"接受");
  assert.equal(assessBrandStore("糖巢",{id:"B",name:"糖巢·特卖",type:"购物服务"},"accept").decision,"接受");
  assert.equal(assessBrandStore("糖巢",{id:"B",name:"糖巢",type:"购物服务"},"exclude").decision,"排除");
  assert.equal(assessBrandStore("糖巢",{name:"糖巢",type:"购物服务"},"accept").decision,"待核实");

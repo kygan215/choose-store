@@ -141,7 +141,7 @@ test("统一品牌规则：SQL与应用一致、候选保存、人工名单、�
   assert.equal((await client.query("SELECT name_decision FROM brand_stores WHERE amap_poi_id=$1",[pending.id])).rows[0].name_decision,"排除");
   const noTags=fixtures.find(r=>r.brand==="爱零食"&&r.name==="爱零食"&&!r.type&&!r.typecode&&!r.business)!;
   await reviewAilingshiPoi(admin,{poi_id:noTags.id,decision:"accept",reason:"仅确认品牌"},"",async()=>connection);
-  assert.equal((await client.query("SELECT name_decision FROM brand_stores WHERE amap_poi_id=$1",[noTags.id])).rows[0].name_decision,"待核实","白名单不能绕过标签证据");
+  assert.equal((await client.query("SELECT name_decision FROM brand_stores WHERE amap_poi_id=$1",[noTags.id])).rows[0].name_decision,"接受","人工核实补足自动标签证据缺失");
   assert.equal(Number((await client.query("SELECT count(*) n FROM audit_logs WHERE action='review_brand_poi'")).rows[0].n),4);
   // A fuzzy hit for another brand must never overwrite an accepted POI.
   const correct={id:"CROSS-BRAND",name:"好想来零食乐园(测试店)",type:"购物服务",tag:"零食",location:[114,30]};

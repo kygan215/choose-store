@@ -25,7 +25,8 @@ test("批量核验原子提交、租户隔离、实际分类、刷新持久化�
   await assert.rejects(bulkReviewBrandStores(admin,{store_ids:[1,6],decision:"accept",reason:"人工核实"},"",connect),/POI ID/);
   assert.equal((await c.query("SELECT count(*) n FROM ailingshi_poi_overrides")).rows[0].n,"0");
   const accepted=await bulkReviewBrandStores(admin,{store_ids:[1,2,3,1],decision:"accept",reason:"已核实品牌"},"127.0.0.1",connect);
-  assert.deepEqual(accepted,{selected:3,poi_count:3,affected:3,accepted:1,excluded:1,pending:1});
+  assert.equal(accepted.accepted,2);assert.equal(accepted.excluded,1);assert.equal(accepted.pending,0);
+  assert.equal(accepted.blocked.length,1);assert.equal(accepted.blocked[0].amap_name,"好想来奶站");
   assert.equal((await c.query("SELECT ailingshi_override FROM brand_stores WHERE id=4")).rows[0].ailingshi_override,"");
   assert.ok((await c.query("SELECT invalidated_at FROM brand_dashboard_snapshots WHERE tenant_id=1")).rows[0].invalidated_at);
   const excluded=await bulkReviewBrandStores(admin,{store_ids:[1,2,3],decision:"exclude",reason:"人工排除"},"",connect);

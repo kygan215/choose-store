@@ -30,8 +30,9 @@ export async function bulkReviewBrandStores(user:AuthUser,input:Record<string,un
     await client.query(`UPDATE brand_region_cache c SET store_count=(SELECT count(*) FROM brand_stores s WHERE s.tenant_id=c.tenant_id AND s.brand_name=c.brand_name AND s.province=c.province AND s.city=c.city AND s.library_visible AND s.deleted_at IS NULL) WHERE c.tenant_id=$1`,[user.tenantId]);
     await client.query("INSERT INTO brand_dashboard_snapshots(tenant_id,invalidated_at) VALUES($1,NOW()) ON CONFLICT(tenant_id) DO UPDATE SET invalidated_at=NOW()",[user.tenantId]);
     const counts=(await client.query(`SELECT count(*) FILTER(WHERE name_decision='接受')::int accepted,count(*) FILTER(WHERE name_decision='排除')::int excluded,count(*) FILTER(WHERE name_decision='待核实')::int pending FROM brand_stores WHERE tenant_id=$1 AND id=ANY($2::bigint[])`,[user.tenantId,ids])).rows[0];
+    const blocked=decision==="accept"?(await client.query("SELECT id,amap_name,name_decision,name_decision_reason FROM brand_stores WHERE tenant_id=$1 AND id=ANY($2::bigint[]) AND name_decision<>'接受' ORDER BY id LIMIT 20",[user.tenantId,ids])).rows:[];
     await client.query("INSERT INTO audit_logs(tenant_id,user_id,action,target_type,target_id,ip_address,details) VALUES($1,$2,'bulk_review_brand_pois','brand_store','batch',$3,$4)",[user.tenantId,user.id,ip,JSON.stringify({decision,reason,store_ids:ids,poi_ids:poiIds,previous:locked.map(r=>({id:r.id,override:r.ailingshi_override})),counts})]);
     await client.query("COMMIT");
-    return {selected:ids.length,poi_count:poiIds.length,affected:locked.filter(r=>!r.deleted_at).length,...counts};
+    return {selected:ids.length,poi_count:poiIds.length,affected:locked.filter(r=>!r.deleted_at).length,...counts,blocked};
   }catch(error){await client.query("ROLLBACK");throw error}finally{client.release()}
 }

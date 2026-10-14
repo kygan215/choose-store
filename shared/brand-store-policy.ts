@@ -68,7 +68,7 @@ export const POLICY_REASONS = {
   conflict: "高德分类或标签证据冲突，待核验", tags: "缺少零食／超市／购物分类或标签证据，待核验",
   accepted: "品牌名称与零食／超市／购物证据通过初筛，未验证品牌归属",
   chain: "规范连锁门店名称通过初筛；高德分类或标签未证实，尚未核验品牌归属及营业状态",
-  manual: "按 POI ID 人工确认名称，零食／超市／购物证据通过初筛",
+  manual: "按 POI ID 人工核实纳入，覆盖自动名称／分类／标签疑点",
 } as const;
 export const isPolicyBrand = (brand: string) => Object.hasOwn(BRAND_IDENTITIES, brand);
 export const usesConfirmedRetailReview = (brand: string) => (CONFIRMED_ADDITIONAL_BRANDS as readonly string[]).includes(brand);
@@ -237,10 +237,17 @@ export function assessBrandStore(brand: string, row: BrandPolicyPoi, override: A
   else if ((brand === "爱零食" && new RegExp(SIMILAR_NAME).test(primary)) || (brand === "好想来" && /^好像来/.test(normalized_name))) { decision = "排除"; decision_reason = POLICY_REASONS.similar; }
   else if (brand === "好想来" && new RegExp(HXL_NON_BRAND_NAME).test(primary)) { decision = "排除"; decision_reason = POLICY_REASONS.hxlNonBrand; }
   else if (new RegExp(CONFIRMED_NON_CHAIN_NAME).test(primary)) { decision = "排除"; decision_reason = POLICY_REASONS.nonChain; }
+  // An explicit review resolves uncertain names and Amap evidence. Keep hard
+  // name/status exclusions above, and never turn another known chain into this brand.
+  else if (override === "accept") {
+    if (!poi_id) decision_reason = POLICY_REASONS.noId;
+    else if (!brandIdentityEvidenceNames(brand).some(name => primary.includes(name)) && Object.values(BRAND_IDENTITIES).flat().some(name => primary.includes(name))) { decision = "排除"; decision_reason = POLICY_REASONS.noBrand; }
+    else { decision = "接受"; decision_reason = POLICY_REASONS.manual; }
+  }
   // Generic shopping/snack evidence is not brand identity. Keep unusual names
   // with the actual brand in their primary name reviewable, not fuzzy hits or
   // landmarks. Explicit POI-ID confirmation can resolve an unrecognized alias.
-  else if (override !== "accept" && primary.trim() && !brandIdentityEvidenceNames(brand).some(name => primary.includes(name))) { decision = "排除"; decision_reason = POLICY_REASONS.noBrand; }
+  else if (primary.trim() && !brandIdentityEvidenceNames(brand).some(name => primary.includes(name))) { decision = "排除"; decision_reason = POLICY_REASONS.noBrand; }
   else if (nameFirstBranch) {
     if (!poi_id) decision_reason = POLICY_REASONS.noId;
     else if (missingEvidence) decision_reason = POLICY_REASONS.missing;
@@ -255,27 +262,27 @@ export function assessBrandStore(brand: string, row: BrandPolicyPoi, override: A
     else if (missingEvidence) decision_reason = POLICY_REASONS.missing;
     else if (confirmedMismatch) decision_reason = POLICY_REASONS.confirmedMismatch;
     else if (!confirmedRetailEvidence) decision_reason = POLICY_REASONS.tags;
-    else { decision = "接受"; decision_reason = override === "accept" ? POLICY_REASONS.manual : POLICY_REASONS.accepted; }
+    else { decision = "接受"; decision_reason = POLICY_REASONS.accepted; }
   }
-  else if (brand === "爱零食" && /^爱零食优选/.test(primary) && override !== "accept") decision_reason = poi_id ? POLICY_REASONS.overlappingName : POLICY_REASONS.noId;
+  else if (brand === "爱零食" && /^爱零食优选/.test(primary)) decision_reason = poi_id ? POLICY_REASONS.overlappingName : POLICY_REASONS.noId;
   else if (new RegExp(EXCLUDED_STORE_LABEL.replaceAll("[[:space:]]", "\\s")).test(exclusionLabels)) { decision = "排除"; decision_reason = POLICY_REASONS.excludedLabel; }
   else if (relatedName && extremeEvidence) decision_reason = POLICY_REASONS.extreme;
   else if (new RegExp(HARD_NON_RETAIL_TAG).test(tags)) { decision = "排除"; decision_reason = POLICY_REASONS.hardCategory; }
   else if (cake && !snackEvidence) { decision = "排除"; decision_reason = POLICY_REASONS.cake; }
   else if (nonTargetCategory && !snackEvidence) { decision = "排除"; decision_reason = POLICY_REASONS.category; }
   else if (!poi_id) decision_reason = POLICY_REASONS.noId;
-  else if (override !== "accept" && brand === "零食有鸣" && new RegExp(REVIEW_CONVENIENCE).test(normalized_name)) decision_reason = POLICY_REASONS.convenience;
+  else if (brand === "零食有鸣" && new RegExp(REVIEW_CONVENIENCE).test(normalized_name)) decision_reason = POLICY_REASONS.convenience;
   else if (missingEvidence) decision_reason = POLICY_REASONS.missing;
-  else if (override !== "accept" && hxlUnknownSuffix) decision_reason = POLICY_REASONS.hxlSuffix;
-  else if (usesConfirmedRetailReview(brand) && override !== "accept") decision_reason = POLICY_REASONS.name;
+  else if (hxlUnknownSuffix) decision_reason = POLICY_REASONS.hxlSuffix;
+  else if (usesConfirmedRetailReview(brand)) decision_reason = POLICY_REASONS.name;
   else if (hxlRetailName && hxlRetailEvidence) { decision = "接受"; decision_reason = POLICY_REASONS.related; }
   else if (relatedName && relatedEvidence && !conflictingRelatedTags(tags, businessCategories)) { decision = "接受"; decision_reason = POLICY_REASONS.related; }
   else if (snackNamed) { decision = "接受"; decision_reason = POLICY_REASONS.accepted; }
-  else if (override !== "accept" && !strictName && !namedRetailBranch && !namedRetailLocation) decision_reason = POLICY_REASONS.name;
+  else if (!strictName && !namedRetailBranch && !namedRetailLocation) decision_reason = POLICY_REASONS.name;
   else if (namedChain) { decision = "接受"; decision_reason = POLICY_REASONS.chain; }
   else if (conflict && !resolvedConflict) decision_reason = POLICY_REASONS.conflict;
   else if (!retail) decision_reason = POLICY_REASONS.tags;
-  else { decision = "接受"; decision_reason = override === "accept" ? POLICY_REASONS.manual : POLICY_REASONS.accepted; }
+  else { decision = "接受"; decision_reason = POLICY_REASONS.accepted; }
   return { original_name, normalized_name, poi_id, decision, decision_reason };
 }
 

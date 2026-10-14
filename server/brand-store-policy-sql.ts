@@ -74,6 +74,10 @@ LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
  WHEN (brand='爱零食' AND split_part(n,'(',1) ~ ${q(SIMILAR_NAME)}) OR (brand='好想来' AND n ~ '^好像来') THEN ${q(R.similar)}
  WHEN brand='好想来' AND split_part(n,'(',1) ~ ${q(HXL_NON_BRAND_NAME)} THEN ${q(R.hxlNonBrand)}
  WHEN split_part(n,'(',1) ~ ${q(CONFIRMED_NON_CHAIN_NAME)} THEN ${q(R.nonChain)}
+ WHEN manual='accept' THEN CASE
+  WHEN btrim(COALESCE(poi_id,''))='' THEN ${q(R.noId)}
+  WHEN ${missingIdentitySql} AND (${[...new Set(Object.values(BRAND_IDENTITIES).flat())].map(name=>`position(${q(name)} in split_part(n,'(',1))>0`).join(' OR ')}) THEN ${q(R.noBrand)}
+  ELSE ${q(R.manual)} END
  WHEN manual<>'accept' AND ${missingIdentitySql} THEN ${q(R.noBrand)}
  WHEN ${nameFirstBranchSql} THEN CASE
   WHEN btrim(COALESCE(poi_id,''))='' THEN ${q(R.noId)}

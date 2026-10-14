@@ -17,7 +17,7 @@ test("爱零食历史重分类、生成列一致、POI人工名单持久化、�
   for(const table of ["brand_stores","brand_region_cache","brand_dashboard_snapshots","stores","audit_logs"])
    await client.query(`CREATE TEMP TABLE ${table} (LIKE public.${table} INCLUDING DEFAULTS INCLUDING GENERATED INCLUDING INDEXES) ON COMMIT DROP`);
   await client.query("CREATE TEMP TABLE ailingshi_poi_overrides(tenant_id bigint,poi_id text,decision text,reason text,reviewed_by bigint,updated_at timestamptz DEFAULT NOW(),PRIMARY KEY(tenant_id,poi_id)) ON COMMIT DROP");
-  const names=["爱零食","爱零食（中心店）","爱零食量贩零食(南门店)","爱零食量贩零食店(南门店)","爱零食的喵(科技大学西门店)","我爱零食","我爱零食屋","最爱零食","爱零食小屋","爱零食硬折扣超市(横州新福店)","爱零食便利店(文岭街店)","爱零食中心店","爱零食·特卖","爱零食()","爱零食(店)","爱零食(中心店)特卖","爱零食量贩零食","　爱零食（Ａ店）　","爱零食(超市店)"];
+  const names=["爱零食","爱零食（中心店）","爱零食量贩零食(南门店)","爱零食量贩零食店(南门店)","爱零食的喵(科技大学西门店)","我爱零食","我爱零食屋","最爱零食","爱零食小屋","爱零食硬折扣超市(横州新福店)","爱零食便利店(文岭街店)","未识别前缀爱零食中心店","爱零食·特卖","爱零食()","爱零食(店)","爱零食(中心店)特卖","爱零食量贩零食","　爱零食（Ａ店）　","爱零食(超市店)"];
   await client.query(`INSERT INTO brand_stores(id,tenant_id,brand_name,source_uid,amap_poi_id,amap_name,longitude,latitude)
    SELECT n,1,'爱零食','B'||n,'B'||n,name,114,30 FROM unnest($1::text[]) WITH ORDINALITY AS t(name,n)`,[names]);
   await client.query(ailingshiMigrationSql);
@@ -38,10 +38,11 @@ test("爱零食历史重分类、生成列一致、POI人工名单持久化、�
   const admin={id:1,tenantId:1,role:"admin"} as Parameters<typeof reviewAilingshiPoi>[0];
   await assert.rejects(reviewAilingshiPoi({...admin,role:"member"},{poi_id:"B12",decision:"accept",reason:"已核对"},"",async()=>connection),/管理员/);
   await assert.rejects(reviewAilingshiPoi({...admin,tenantId:2},{poi_id:"B12",decision:"accept",reason:"已核对"},"",async()=>connection),/不存在/);
+  assert.equal((await client.query("SELECT name_decision FROM brand_stores WHERE amap_poi_id='B12'")).rows[0].name_decision,"待核实","人工核验样例必须先处于待核验");
   await reviewAilingshiPoi(admin,{poi_id:"B12",decision:"accept",reason:"人工确认指定POI"},"",async()=>connection);
   assert.equal((await listBrandStores(1,{review_status:"name_pending"},runQuery)).total,pendingCount-1);
   await reviewAilingshiPoi(admin,{poi_id:"B1",decision:"exclude",reason:"人工确认非目标门店"},"",async()=>connection);
-  const input=[{id:"B12",name:"爱零食中心店",type:"购物服务",location:[114,30],city:"测试市"},{id:"B1",name:"爱零食",type:"购物服务",location:[114,30],city:"测试市"},{id:"B_missing_location",name:"爱零食·待查",location:null,address:"无坐标记录"}];
+  const input=[{id:"B12",name:"未识别前缀爱零食中心店",type:"购物服务",location:[114,30],city:"测试市"},{id:"B1",name:"爱零食",type:"购物服务",location:[114,30],city:"测试市"},{id:"B_missing_location",name:"爱零食·待查",location:null,address:"无坐标记录"}];
   // All POI IDs are stable; repeated refresh must not duplicate or override manual decisions.
   await client.query("CREATE TEMP SEQUENCE ailingshi_test_ids START 1000");
   await client.query("ALTER TABLE brand_stores ALTER COLUMN id SET DEFAULT nextval('ailingshi_test_ids')");
