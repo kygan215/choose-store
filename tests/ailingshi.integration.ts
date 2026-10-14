@@ -14,7 +14,7 @@ test("爱零食历史重分类、生成列一致、POI人工名单持久化、�
  const client=await pool.connect();
  try{
   await client.query("BEGIN");
-  for(const table of ["brand_stores","brand_region_cache","brand_dashboard_snapshots","stores","audit_logs"])
+  for(const table of ["brand_stores","brand_store_removals","brand_store_record_overrides","brand_region_cache","brand_dashboard_snapshots","stores","audit_logs"])
    await client.query(`CREATE TEMP TABLE ${table} (LIKE public.${table} INCLUDING DEFAULTS INCLUDING GENERATED INCLUDING INDEXES) ON COMMIT DROP`);
   await client.query("CREATE TEMP TABLE ailingshi_poi_overrides(tenant_id bigint,poi_id text,decision text,reason text,reviewed_by bigint,updated_at timestamptz DEFAULT NOW(),PRIMARY KEY(tenant_id,poi_id)) ON COMMIT DROP");
   const names=["爱零食","爱零食（中心店）","爱零食量贩零食(南门店)","爱零食量贩零食店(南门店)","爱零食的喵(科技大学西门店)","我爱零食","我爱零食屋","最爱零食","爱零食小屋","爱零食硬折扣超市(横州新福店)","爱零食便利店(文岭街店)","未识别前缀爱零食中心店","爱零食·特卖","爱零食()","爱零食(店)","爱零食(中心店)特卖","爱零食量贩零食","　爱零食（Ａ店）　","爱零食(超市店)"];

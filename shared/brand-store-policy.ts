@@ -46,7 +46,7 @@ export const NAME_FIRST_BRANCH_REVIEW_TAG = `${EXTREME_STORE_TAG}|公司|工厂|
 export const INACTIVE_STATUS = "暂停营业|装修中|正在装修|装修店铺|停业|歇业|已关闭|未开业|即将开业|待开业|筹备中|施工中";
 export const WAREHOUSE_BRANCH = "\\([^()]*(仓库|仓)\\)";
 export const POLICY_REASONS = {
-  blacklist: "按 POI ID 人工排除", unrelated: "名称主体明确为餐饮、足浴、生鲜、仓库等非目标业态",
+  blacklist: "按 POI ID 人工排除", recordExclude: "按当前门店记录人工排除（无高德 POI ID）", unrelated: "名称主体明确为餐饮、足浴、生鲜、仓库等非目标业态",
   inactive: "标注暂停营业、装修中或未开业，非当前营业门店",
   warehouse: "名称明确为仓库，非营业门店",
   similar: "相似名称，不按目标品牌收录", cake: "分类或标签明确为蛋糕／烘焙等非目标业态",
@@ -69,6 +69,7 @@ export const POLICY_REASONS = {
   accepted: "品牌名称与零食／超市／购物证据通过初筛，未验证品牌归属",
   chain: "规范连锁门店名称通过初筛；高德分类或标签未证实，尚未核验品牌归属及营业状态",
   manual: "按 POI ID 人工核实纳入，覆盖自动名称／分类／标签疑点",
+  manualRecord: "按当前门店记录人工核实纳入（无高德 POI ID），覆盖自动名称／分类／标签疑点",
 } as const;
 export const isPolicyBrand = (brand: string) => Object.hasOwn(BRAND_IDENTITIES, brand);
 export const usesConfirmedRetailReview = (brand: string) => (CONFIRMED_ADDITIONAL_BRANDS as readonly string[]).includes(brand);
@@ -230,7 +231,7 @@ export function assessBrandStore(brand: string, row: BrandPolicyPoi, override: A
   const nameFirstExtreme = new RegExp(NAME_FIRST_BRANCH_REVIEW_TAG).test(exclusionLabels)
     || (!businessCategories.replace(/;/g, "").trim() && codes.some(c => /^(08|09|10|12|14|17)\d{4}$/.test(c)));
   let decision: "接受" | "排除" | "待核实" = "待核实", decision_reason: string;
-  if (poi_id && override === "exclude") { decision = "排除"; decision_reason = POLICY_REASONS.blacklist; }
+  if (override === "exclude") { decision = "排除"; decision_reason = poi_id ? POLICY_REASONS.blacklist : POLICY_REASONS.recordExclude; }
   else if (new RegExp(INACTIVE_STATUS).test(sourceName)) { decision = "排除"; decision_reason = POLICY_REASONS.inactive; }
   else if (new RegExp(WAREHOUSE_BRANCH).test(normalized_name)) { decision = "排除"; decision_reason = POLICY_REASONS.warehouse; }
   else if (new RegExp(`${UNRELATED_NAME}|${EXPLICIT_UNRELATED}|${CLEAR_UNRELATED_BUSINESS}`).test(primaryForExclusions) || otherShopLandmark || new RegExp(NON_STORE_BRANCH).test(normalized_name) || new RegExp(NON_STORE_TAIL).test(sourceName)) { decision = "排除"; decision_reason = POLICY_REASONS.unrelated; }
@@ -240,9 +241,8 @@ export function assessBrandStore(brand: string, row: BrandPolicyPoi, override: A
   // An explicit review resolves uncertain names and Amap evidence. Keep hard
   // name/status exclusions above, and never turn another known chain into this brand.
   else if (override === "accept") {
-    if (!poi_id) decision_reason = POLICY_REASONS.noId;
-    else if (!brandIdentityEvidenceNames(brand).some(name => primary.includes(name)) && Object.values(BRAND_IDENTITIES).flat().some(name => primary.includes(name))) { decision = "排除"; decision_reason = POLICY_REASONS.noBrand; }
-    else { decision = "接受"; decision_reason = POLICY_REASONS.manual; }
+    if (!brandIdentityEvidenceNames(brand).some(name => primary.includes(name)) && Object.values(BRAND_IDENTITIES).flat().some(name => primary.includes(name))) { decision = "排除"; decision_reason = POLICY_REASONS.noBrand; }
+    else { decision = "接受"; decision_reason = poi_id ? POLICY_REASONS.manual : POLICY_REASONS.manualRecord; }
   }
   // Generic shopping/snack evidence is not brand identity. Keep unusual names
   // with the actual brand in their primary name reviewable, not fuzzy hits or

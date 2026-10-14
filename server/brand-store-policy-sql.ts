@@ -67,7 +67,7 @@ LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
  business_tags ~ '(^|[;,])零食([;,]|$)' AS business_snack,
  tags ~ ${q(`(^|[;,|])[[:space:]]*(${CLEAR_RETAIL_LABEL})[[:space:]]*([;,|]|$)`)} AS clear_retail FROM evidence)
  SELECT CASE
- WHEN btrim(COALESCE(poi_id,''))<>'' AND manual='exclude' THEN ${q(R.blacklist)}
+ WHEN manual='exclude' THEN CASE WHEN btrim(COALESCE(poi_id,''))<>'' THEN ${q(R.blacklist)} ELSE ${q(R.recordExclude)} END
  WHEN source_name ~ ${q(INACTIVE_STATUS)} THEN ${q(R.inactive)}
  WHEN n ~ ${q(WAREHOUSE_BRANCH)} THEN ${q(R.warehouse)}
  WHEN ${primaryForExclusionsSql} ~ ${q(`${UNRELATED_NAME}|${EXPLICIT_UNRELATED}|${CLEAR_UNRELATED_BUSINESS}`)} OR ${otherShopLandmarkSql} OR n ~ ${q(NON_STORE_BRANCH)} OR source_name ~ ${q(NON_STORE_TAIL)} THEN ${q(R.unrelated)}
@@ -75,9 +75,8 @@ LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
  WHEN brand='好想来' AND split_part(n,'(',1) ~ ${q(HXL_NON_BRAND_NAME)} THEN ${q(R.hxlNonBrand)}
  WHEN split_part(n,'(',1) ~ ${q(CONFIRMED_NON_CHAIN_NAME)} THEN ${q(R.nonChain)}
  WHEN manual='accept' THEN CASE
-  WHEN btrim(COALESCE(poi_id,''))='' THEN ${q(R.noId)}
   WHEN ${missingIdentitySql} AND (${[...new Set(Object.values(BRAND_IDENTITIES).flat())].map(name=>`position(${q(name)} in split_part(n,'(',1))>0`).join(' OR ')}) THEN ${q(R.noBrand)}
-  ELSE ${q(R.manual)} END
+  ELSE CASE WHEN btrim(COALESCE(poi_id,''))<>'' THEN ${q(R.manual)} ELSE ${q(R.manualRecord)} END END
  WHEN manual<>'accept' AND ${missingIdentitySql} THEN ${q(R.noBrand)}
  WHEN ${nameFirstBranchSql} THEN CASE
   WHEN btrim(COALESCE(poi_id,''))='' THEN ${q(R.noId)}
@@ -112,8 +111,8 @@ $$;
 CREATE OR REPLACE FUNCTION brand_policy_decision(brand text, name text, poi_id text, manual text, poi_type text, codes text, raw jsonb) RETURNS text
 LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
  SELECT CASE brand_policy_reason(brand,name,poi_id,manual,poi_type,codes,raw)
- WHEN ${q(R.accepted)} THEN '接受' WHEN ${q(R.manual)} THEN '接受' WHEN ${q(R.chain)} THEN '接受' WHEN ${q(R.related)} THEN '接受' WHEN ${q(R.nameFirstBranch)} THEN '接受'
- ${[R.blacklist,R.inactive,R.warehouse,R.unrelated,R.similar,R.hardCategory,R.cake,R.category,R.hxlNonBrand,R.excludedLabel,R.noBrand,R.nonChain].map(r=>`WHEN ${q(r)} THEN '排除'`).join(" ")}
+ WHEN ${q(R.accepted)} THEN '接受' WHEN ${q(R.manual)} THEN '接受' WHEN ${q(R.manualRecord)} THEN '接受' WHEN ${q(R.chain)} THEN '接受' WHEN ${q(R.related)} THEN '接受' WHEN ${q(R.nameFirstBranch)} THEN '接受'
+ ${[R.blacklist,R.recordExclude,R.inactive,R.warehouse,R.unrelated,R.similar,R.hardCategory,R.cake,R.category,R.hxlNonBrand,R.excludedLabel,R.noBrand,R.nonChain].map(r=>`WHEN ${q(r)} THEN '排除'`).join(" ")}
  ELSE '待核实' END
 $$;
 `;

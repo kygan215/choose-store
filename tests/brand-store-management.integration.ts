@@ -13,7 +13,7 @@ test("删除、跨租户保护、归档、审计、刷新防重入与恢复使�
   const connect=async()=>({query:client.query.bind(client),release:()=>{}} as unknown as PoolClient);
   try{
     // Session-local tables shadow production tables; no public fixture rows are written.
-    for(const table of ["brand_stores","brand_store_removals","brand_region_cache","audit_logs","stores","brand_dashboard_snapshots"])
+    for(const table of ["brand_stores","brand_store_removals","brand_store_record_overrides","ailingshi_poi_overrides","brand_region_cache","audit_logs","stores","brand_dashboard_snapshots"])
       await client.query(`CREATE TEMP TABLE ${table} (LIKE public.${table} INCLUDING DEFAULTS INCLUDING GENERATED INCLUDING INDEXES)`);
     await client.query(`INSERT INTO brand_stores(id,tenant_id,brand_name,source_uid,amap_poi_id,amap_name,province,city,district,address,longitude,latitude)
       VALUES(900001,1,'糖巢','remove-fixture-1','remove-fixture-1','糖巢(测试店)','福建省','三明市','三元区','测试路1号',117.6,26.2),
@@ -51,7 +51,7 @@ test("删除、跨租户保护、归档、审计、刷新防重入与恢复使�
     assert.equal((await client.query("SELECT count(*) FROM audit_logs")).rows[0].count,"3");
   }finally{
     await client.query("ROLLBACK");
-    for(const table of ["brand_stores","brand_store_removals","brand_region_cache","audit_logs","stores","brand_dashboard_snapshots"])await client.query(`DROP TABLE IF EXISTS pg_temp.${table}`);
+    for(const table of ["brand_stores","brand_store_removals","brand_store_record_overrides","ailingshi_poi_overrides","brand_region_cache","audit_logs","stores","brand_dashboard_snapshots"])await client.query(`DROP TABLE IF EXISTS pg_temp.${table}`);
     client.release();
   }
 });

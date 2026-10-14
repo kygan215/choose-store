@@ -6,6 +6,7 @@ import {pool} from "../server/db.js";
 import {reviewAilingshiPoi} from "../server/ailingshi-review.js";
 import {bulkReviewBrandStores} from "../server/brand-store-bulk-review.js";
 import {brandPolicyFunctionsSql} from "../server/brand-store-policy-sql.js";
+import {brandStoreRecordReviewSql} from "../server/brand-store-record-review-sql.js";
 import {listBrandStores,saveDiscoveredStores} from "../server/brand-library.js";
 const admin:AuthUser={id:1,tenantId:1,email:"review@test.local",displayName:"核验管理员",role:"admin"};
 after(()=>pool.end());
@@ -14,9 +15,9 @@ for(const mode of ["single","bulk"] as const)test(`${mode}：人工纳入服装�
  const c=await pool.connect();
  try{
   await c.query("BEGIN");
-  for(const table of ["brand_stores","ailingshi_poi_overrides","brand_region_cache","brand_dashboard_snapshots","audit_logs","stores"])await c.query(`CREATE TEMP TABLE ${table}(LIKE public.${table} INCLUDING DEFAULTS INCLUDING GENERATED INCLUDING INDEXES) ON COMMIT DROP`);
+  for(const table of ["brand_stores","ailingshi_poi_overrides","brand_store_record_overrides","brand_region_cache","brand_dashboard_snapshots","audit_logs","stores"])await c.query(`CREATE TEMP TABLE ${table}(LIKE public.${table} INCLUDING DEFAULTS INCLUDING GENERATED INCLUDING INDEXES) ON COMMIT DROP`);
   await c.query(brandPolicyFunctionsSql);
-  await c.query("CREATE TRIGGER apply_ailingshi_override BEFORE INSERT OR UPDATE ON brand_stores FOR EACH ROW EXECUTE FUNCTION apply_ailingshi_override()");
+  await c.query(brandStoreRecordReviewSql);
   const raw={id:"MANUAL-REAL-CASE",name:"好想来零食乐园(临沂河东区八湖镇一店)",type:"购物服务;服装鞋帽皮具店;服装鞋帽皮具店",typecode:"061100",tag:"好想来;零食",business:{rectag:"好想来",keytag:"零食"},location:[114,30]};
   await c.query("INSERT INTO brand_stores(id,tenant_id,brand_name,source_uid,amap_poi_id,amap_name,poi_type,typecode,raw_json,longitude,latitude) VALUES(1,1,'好想来',$1,$1,$2,$3,$4,$5,114,30)",[raw.id,raw.name,raw.type,raw.typecode,JSON.stringify(raw)]);
   const runQuery=(sql:string,values?:unknown[])=>c.query(sql,values);

@@ -19,7 +19,7 @@ test("统一品牌规则：SQL与应用一致、候选保存、人工名单、�
  const client=await pool.connect();
  try{
   await client.query("BEGIN");
-  for(const t of ["brand_stores","brand_region_cache","brand_dashboard_snapshots","stores","audit_logs","ailingshi_poi_overrides"])
+  for(const t of ["brand_stores","brand_store_removals","brand_store_record_overrides","brand_region_cache","brand_dashboard_snapshots","stores","audit_logs","ailingshi_poi_overrides"])
    await client.query(`CREATE TEMP TABLE ${t} (LIKE public.${t} INCLUDING DEFAULTS INCLUDING GENERATED INCLUDING INDEXES) ON COMMIT DROP`);
   await client.query(brandPolicyMigrationSql);
   await client.query("CREATE TRIGGER apply_ailingshi_override BEFORE INSERT OR UPDATE ON brand_stores FOR EACH ROW EXECUTE FUNCTION apply_ailingshi_override()");

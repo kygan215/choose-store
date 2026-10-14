@@ -220,11 +220,12 @@ test("8家已确认零食有鸣超市和分店餐馆、公寓地标不误判",()
   assert.equal(assessBrandStore("零食有鸣",{id:"B",name:`零食有鸣批发超市(${branch})`,typecode:"060000",tag:"日杂店"}).decision,"排除",`最新日杂店排除规则优先：${branch}`);
  }
 });
-test("人工核实纳入覆盖名称和标签疑点，黑名单优先，无ID仍待核验",()=>{
+test("人工核实纳入覆盖名称和标签疑点，黑名单优先，无ID须按记录人工确认",()=>{
  assert.equal(assessBrandStore("糖巢",{id:"B",name:"糖巢·特卖"},"accept").decision,"接受");
  assert.equal(assessBrandStore("糖巢",{id:"B",name:"糖巢·特卖",type:"购物服务"},"accept").decision,"接受");
  assert.equal(assessBrandStore("糖巢",{id:"B",name:"糖巢",type:"购物服务"},"exclude").decision,"排除");
- assert.equal(assessBrandStore("糖巢",{name:"糖巢",type:"购物服务"},"accept").decision,"待核实");
+ assert.equal(assessBrandStore("糖巢",{name:"糖巢",type:"购物服务"}).decision,"待核实");
+ assert.equal(assessBrandStore("糖巢",{name:"糖巢",type:"购物服务"},"accept").decision,"接受");
 });
 test("品牌发现统一保存候选、按POI去重、默认只输出接受，旧别名不能绕过规则",async()=>{
  const rows=[{id:"GOOD",name:"爱零食硬折扣超市(横州新福店)",type:"购物服务"},{id:"PENDING",name:"爱零食(中心店)"},{id:"CAKE",name:"爱零食蛋糕店",type:"购物服务"}].map(row=>({...row,location:"114,30"}));

@@ -24,7 +24,7 @@ export function PoiFilterBar({pois,radii,value,onChange}:{pois:ExplorerPoi[];rad
 
 export function PoiDetails({poi,onClose}:{poi:ExplorerPoi;onClose:()=>void}){
   const titleId=useId(),ref=useRef<HTMLElement>(null),url=amapPlaceUrl(poi.id);
-  useEffect(()=>{ref.current?.focus()},[poi]);
+  useEffect(()=>{ref.current?.focus({preventScroll:true})},[poi]);
   return <section ref={ref} tabIndex={-1} className="poi-detail-card" aria-labelledby={titleId} onKeyDown={event=>{if(event.key==="Escape")onClose()}}>
     <div className="poi-detail-heading"><div><small>周边 POI 详情</small><h3 id={titleId}>{poi.name}</h3></div><button type="button" aria-label="关闭 POI 详情" onClick={onClose}>×</button></div>
     <div className="poi-detail-tags"><span className="tag">{poi.category}</span>{poi.competitor_relation&&<span className="tag">{poi.competitor_relation}</span>}</div>
@@ -49,7 +49,7 @@ export default function PoiTable({pois,radii}:{pois:ExplorerPoi[];radii:number[]
     <PoiFilterBar pois={pois} radii={radii} value={filters} onChange={value=>{setFilters(value);setSelected(null)}}/>
     <p className="poi-result-count" aria-live="polite">筛选结果 {rows.length} / {pois.length} 条 · 按直线距离从近到远排列 · 点击名称查看详情</p>
     {selectedPoi&&<PoiDetails poi={selectedPoi} onClose={()=>setSelected(null)}/>}
-    <div className="table-wrap"><table><thead><tr><th>POI 名称</th><th>分类</th><th>地址</th><th>直线距离</th><th>距离层级</th></tr></thead><tbody>
+    <div className="table-wrap" data-scroll-memory="single-poi-table"><table><thead><tr><th>POI 名称</th><th>分类</th><th>地址</th><th>直线距离</th><th>距离层级</th></tr></thead><tbody>
       {rows.map((poi,index)=><tr key={`${poiKey(poi)}-${index}`} className={selectedPoi===poi?"current-row":""}><td><button type="button" className="poi-name-button" onClick={()=>setSelected(poi)}>{poi.name}</button></td><td><span className="tag">{poi.category}</span></td><td>{poi.address||"暂无地址"}</td><td>{poi.distance} m</td><td>{poi.distance_bucket||"—"}</td></tr>)}
       {!rows.length&&<tr><td colSpan={5}><div className="empty"><b>当前筛选没有匹配的 POI</b><p>可调整分类、关键词或距离。分类为 0 表示本次结果未包含该类地点，不代表附近一定没有。</p></div></td></tr>}
     </tbody></table></div>
