@@ -12,6 +12,7 @@ import { relatedEvidenceFixtures } from "./brand-related-evidence-fixtures.js";
 import { excludedLabelFixtures } from "./brand-excluded-label-fixtures.js";
 import { hxlRetailFixtures } from "./hxl-retail-fixtures.js";
 import {identityRejectionFixtures} from "./brand-identity-rejection-fixtures.js";
+import {additionalBrandFixtures} from "./additional-brand-policy-fixtures.js";
 after(()=>pool.end());
 
 test("统一品牌规则：SQL与应用一致、候选保存、人工名单、默认统计、分页、租户隔离",async()=>{
@@ -95,6 +96,12 @@ test("统一品牌规则：SQL与应用一致、候选保存、人工名单、�
    const expected=assessBrandStore(row.brand,row);
    const result=(await client.query("SELECT brand_policy_decision($1,$2,$3,'',$4,$5,$6) decision,brand_policy_reason($1,$2,$3,'',$4,$5,$6) reason",[row.brand,row.name,row.id,row.type||"",row.typecode||"",JSON.stringify(row)])).rows[0];
    assert.equal(result.decision,expected.decision,JSON.stringify(row));assert.equal(result.reason,expected.decision_reason);
+  }
+  for(const {brand,expected,...row} of additionalBrandFixtures)for(const manual of ["","accept","exclude"] as const){
+   const application=assessBrandStore(brand,{id:"ADDITIONAL",...row},manual);
+   const sql=(await client.query("SELECT brand_policy_decision($1,$2,'ADDITIONAL',$3,$4,'',$5) decision,brand_policy_reason($1,$2,'ADDITIONAL',$3,$4,'',$5) reason",[brand,row.name,manual,row.type,JSON.stringify({tag:row.tag})])).rows[0];
+   if(manual==="")assert.equal(sql.decision,expected,JSON.stringify(row));
+   assert.equal(sql.decision,application.decision,JSON.stringify(row));assert.equal(sql.reason,application.decision_reason,JSON.stringify(row));
   }
   for(const {brand,...row} of identityRejectionFixtures)for(const manual of ["","accept","exclude"] as const){
    const expected=assessBrandStore(brand,{id:"IDENTITY",...row},manual);

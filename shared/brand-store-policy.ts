@@ -2,12 +2,14 @@ import { normalizeAilingshiName, type AilingshiOverride } from "./ailingshi.js";
 
 // Brand identities come from the catalog, user confirmations and brand sites.
 // Full-name patterns below are our screening policy, not official certification.
+export const CONFIRMED_ADDITIONAL_BRANDS = ["优味多", "吃货基地", "加一加", "馋不二", "零小惠", "好特卖", "奉鲜鲜果", "购物猩", "同喜铺子", "零食优选"] as const;
 export const BRAND_IDENTITIES: Record<string, string[]> = {
   "吖嘀吖嘀": ["吖嘀吖嘀"], "好想来": ["好想来", "好想来品牌零食", "好想来零食乐园", "好想来全食优选"],
   "戴永红": ["戴永红"], "来伊份": ["来伊份"], "来优品": ["来优品", "来优品品牌零食", "来优品零食乐园"],
   "爱零食": ["爱零食"], "糖巢": ["糖巢"], "老婆大人": ["老婆大人"],
   "赵一鸣零食": ["赵一鸣零食", "赵一鸣省钱超市"], "陆小馋": ["陆小馋"],
   "零食很忙": ["零食很忙"], "零食悦": ["零食悦"], "零食有鸣": ["零食有鸣"], "养馋记": ["养馋记"],
+  ...Object.fromEntries(CONFIRMED_ADDITIONAL_BRANDS.map(name => [name, [name]])),
 };
 export const RETAIL_SUFFIX = "零食|零食店|零食铺|零食超市|零食省钱超市|量贩零食|量贩零食店|量贩零食超市|零食量贩|零食量贩店|零食专卖店|新一代国民零食|休闲食品|超市|批发超市|硬折扣超市|省钱超市|折扣超市|购物超市|生活超市|便利店|便利超市|量贩便利店";
 export const UNRELATED_NAME = "蛋糕|糕饼|西饼|酱卤|卤味|卤菜|熟食|餐厅|餐馆|饭店|小吃|快餐|火锅|烧烤|麻辣烫|炸鸡|汉堡|奶茶|咖啡|面馆|浇面|米粉|足道|足疗|足浴|按摩|推拿|生鲜超市|酒店|宾馆|药房|药店|服装|理发|美容|公司$|仓库|配送中心|仓配中心|供应链中心|办事处|甜品|烘焙|民宿|公寓$|外卖柜|网吧|KTV|停车场|充电站|动物医院|物流基地|面试中心|菜鸟驿站|铁锅炖|农家饭馆|钓鱼|垂钓|钓场|台球(俱乐部|店)?$|棋牌(俱乐部|室)?$|洗衣(店)?$|果业$|眼镜店$";
@@ -51,6 +53,8 @@ export const POLICY_REASONS = {
   noId: "缺少 POI ID，待核验", name: "名称未匹配品牌完整结构，待核验",
   noBrand: "名称主体没有目标品牌依据；其他品牌、普通店名或仅地标命中，不按该品牌收录",
   nonChain: "名称主体为用户确认的非目标连锁名称",
+  overlappingName: "爱零食优选系列名称尚未确认，按用户要求待核验",
+  confirmedMismatch: "正常品牌名称与分类或标签不符，按确认规则待核验",
   convenience: "零食有鸣便利名称按用户要求待核验",
   related: "品牌主体明确，购物／餐饮／便利店等相关证据通过初筛，未验证品牌归属",
   extreme: "名称疑似品牌门店，但分类或标签明显不相关，待核验",
@@ -64,6 +68,7 @@ export const POLICY_REASONS = {
   manual: "按 POI ID 人工确认名称，零食／超市／购物证据通过初筛",
 } as const;
 export const isPolicyBrand = (brand: string) => Object.hasOwn(BRAND_IDENTITIES, brand);
+export const usesConfirmedRetailReview = (brand: string) => (CONFIRMED_ADDITIONAL_BRANDS as readonly string[]).includes(brand);
 // 赵一鸣 is an already-supported screening alias, not an added search term.
 export const brandIdentityEvidenceNames = (brand: string) => brand === "赵一鸣零食" ? [...BRAND_IDENTITIES[brand], "赵一鸣"] : BRAND_IDENTITIES[brand] || [brand];
 const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -93,7 +98,8 @@ export function brandNamePattern(brand: string) {
   const branches = `(?:\\s*${branch}){1,2}`;
   const max = brand === "零食有鸣" ? `|MAX${branches}` : "";
   // Match recurrent chain formats, not arbitrary brand-keyword hits.
-  return `^(${names.map(escapeRegex).join("|")})(?:(?:·?(${RETAIL_SUFFIX}))(?:${branches}|[^()·,]{2,}店(?:${branches})?)?|${branches}|店(?:${branches})?|[-－][^()]+店${max})?$`;
+  const retailSuffix = usesConfirmedRetailReview(brand) ? `${RETAIL_SUFFIX}|折扣店` : RETAIL_SUFFIX;
+  return `^(${names.map(escapeRegex).join("|")})(?:(?:·?(${retailSuffix}))(?:${branches}|[^()·,]{2,}店(?:${branches})?)?|${branches}|店(?:${branches})?|[-－][^()]+店${max})?$`;
 }
 export function brandBareBranchPattern(brand: string) {
   const names = BRAND_IDENTITIES[brand] || [brand];
@@ -133,6 +139,10 @@ export function assessBrandStore(brand: string, row: BrandPolicyPoi, override: A
   const original_name = String(row.name ?? row.amap_name ?? ""), sourceName = normalizeAilingshiName(original_name);
   const normalized_name = brandMatchName(brand, sourceName);
   const poi_id = String(row.id ?? row.amap_poi_id ?? "").trim(), primary = normalized_name.split("(")[0];
+  const primaryForExclusions = usesConfirmedRetailReview(brand) ? primary.replace(new RegExp(`^${escapeRegex(brand)}`), "") : primary;
+  // Compare other identities after the selected brand prefix, so 爱零食优选
+  // does not become a cross-brand hit merely because 零食优选 was re-enabled.
+  const primaryForOtherBrands = primary.startsWith(brand) ? primary.slice(brand.length) : primary;
   const tags = retailTags(row), codes = String(row.typecode ?? "").replace(/\s/g, "").split(/[|;,]/);
   const category = String(row.type ?? row.poi_type ?? "");
   const business = row.business && typeof row.business === "object" ? row.business as Record<string, unknown> : {};
@@ -181,7 +191,7 @@ export function assessBrandStore(brand: string, row: BrandPolicyPoi, override: A
     && !/\(\s*店\)/.test(normalized_name)
     && !new RegExp(`${SOFT_UNRELATED_NAME}|${LOCATION_BRANCH_BLOCK}|${AMBIGUOUS_STORE_NAME}`).test(primary)
     && !new RegExp(LOCATION_BRANCH_BLOCK).test(normalized_name.slice(primary.length))
-    && !Object.entries(BRAND_IDENTITIES).some(([other, names]) => other !== brand && names.some(name => primary.includes(name)));
+    && !Object.entries(BRAND_IDENTITIES).some(([other, names]) => other !== brand && names.some(name => primaryForOtherBrands.includes(name)));
   const relatedEvidence = new RegExp(RELATED_STORE_TAG).test(tags) || codes.some(c => /^(05|06)\d{4}$/.test(c));
   const extremeEvidence = new RegExp(EXTREME_STORE_TAG).test(tags);
   const missingEvidence = !tags.replace(/;/g, "").trim() && !codes.some(c => /^\d{6}$/.test(c));
@@ -193,15 +203,22 @@ export function assessBrandStore(brand: string, row: BrandPolicyPoi, override: A
   const hxlRetailName = brand === "好想来" && primary.includes("好想来")
     && !/\(\s*(店)?\)/.test(normalized_name)
     && !new RegExp(`${SOFT_UNRELATED_NAME}|${LOCATION_BRANCH_BLOCK}|${HXL_REVIEW_NAME}`).test(primary)
-    && !Object.entries(BRAND_IDENTITIES).some(([other,names]) => other !== brand && names.some(name => primary.includes(name)))
+    && !Object.entries(BRAND_IDENTITIES).some(([other,names]) => other !== brand && names.some(name => primaryForOtherBrands.includes(name)))
     && !(normalized_name.includes(")") && new RegExp(`${UNRELATED_NAME}|${EXPLICIT_UNRELATED}`).test(normalized_name.slice(normalized_name.lastIndexOf(")")+1)));
   const hxlRetailEvidence = new RegExp(RELATED_STORE_TAG).test(exclusionLabels)
     && !extremeEvidence && !conflictingRelatedTags(tags, businessCategories);
+  const confirmedRetailName = usesConfirmedRetailReview(brand) && (strictName || namedRetailBranch || namedRetailLocation || new RegExp(brandSnackNamePattern(brand)).test(normalized_name))
+    && !new RegExp(`${SOFT_UNRELATED_NAME}|${AMBIGUOUS_STORE_NAME}|${LOCATION_BRANCH_BLOCK}`).test(primaryForExclusions)
+    && !new RegExp(LOCATION_BRANCH_BLOCK).test(normalized_name.slice(primary.length));
+  const confirmedMismatch = new RegExp(`${CAKE_TAG}|${NON_TARGET_CATEGORY_TAG}|${CONFLICT_TAG}|${EXTREME_STORE_TAG}`).test(exclusionLabels)
+    || new RegExp(EXCLUDED_STORE_LABEL.replaceAll("[[:space:]]", "\\s")).test(exclusionLabels)
+    || (!businessCategories.replace(/;/g, "").trim() && codes.some(c => /^\d{6}$/.test(c) && !/^06\d{4}$/.test(c)));
+  const confirmedRetailEvidence = /零食|超市|购物|便利店|折扣店/.test(exclusionLabels) || (!businessCategories.replace(/;/g, "").trim() && codes.some(c => /^06\d{4}$/.test(c)));
   let decision: "接受" | "排除" | "待核实" = "待核实", decision_reason: string;
   if (poi_id && override === "exclude") { decision = "排除"; decision_reason = POLICY_REASONS.blacklist; }
   else if (new RegExp(INACTIVE_STATUS).test(sourceName)) { decision = "排除"; decision_reason = POLICY_REASONS.inactive; }
   else if (new RegExp(WAREHOUSE_BRANCH).test(normalized_name)) { decision = "排除"; decision_reason = POLICY_REASONS.warehouse; }
-  else if (new RegExp(`${UNRELATED_NAME}|${EXPLICIT_UNRELATED}|${CLEAR_UNRELATED_BUSINESS}`).test(primary) || otherShopLandmark || new RegExp(NON_STORE_BRANCH).test(normalized_name) || new RegExp(NON_STORE_TAIL).test(sourceName)) { decision = "排除"; decision_reason = POLICY_REASONS.unrelated; }
+  else if (new RegExp(`${UNRELATED_NAME}|${EXPLICIT_UNRELATED}|${CLEAR_UNRELATED_BUSINESS}`).test(primaryForExclusions) || otherShopLandmark || new RegExp(NON_STORE_BRANCH).test(normalized_name) || new RegExp(NON_STORE_TAIL).test(sourceName)) { decision = "排除"; decision_reason = POLICY_REASONS.unrelated; }
   else if ((brand === "爱零食" && new RegExp(SIMILAR_NAME).test(primary)) || (brand === "好想来" && /^好像来/.test(normalized_name))) { decision = "排除"; decision_reason = POLICY_REASONS.similar; }
   else if (brand === "好想来" && new RegExp(HXL_NON_BRAND_NAME).test(primary)) { decision = "排除"; decision_reason = POLICY_REASONS.hxlNonBrand; }
   else if (new RegExp(CONFIRMED_NON_CHAIN_NAME).test(primary)) { decision = "排除"; decision_reason = POLICY_REASONS.nonChain; }
@@ -209,6 +226,17 @@ export function assessBrandStore(brand: string, row: BrandPolicyPoi, override: A
   // with the actual brand in their primary name reviewable, not fuzzy hits or
   // landmarks. Explicit POI-ID confirmation can resolve an unrecognized alias.
   else if (override !== "accept" && primary.trim() && !brandIdentityEvidenceNames(brand).some(name => primary.includes(name))) { decision = "排除"; decision_reason = POLICY_REASONS.noBrand; }
+  // These ten brands have a user-confirmed evidence boundary: a normal chain
+  // name with a conflicting label is reviewable, never accepted by broad retail
+  // evidence or removed by the legacy hard-category rules below.
+  else if (confirmedRetailName) {
+    if (!poi_id) decision_reason = POLICY_REASONS.noId;
+    else if (missingEvidence) decision_reason = POLICY_REASONS.missing;
+    else if (confirmedMismatch) decision_reason = POLICY_REASONS.confirmedMismatch;
+    else if (!confirmedRetailEvidence) decision_reason = POLICY_REASONS.tags;
+    else { decision = "接受"; decision_reason = override === "accept" ? POLICY_REASONS.manual : POLICY_REASONS.accepted; }
+  }
+  else if (brand === "爱零食" && /^爱零食优选/.test(primary) && override !== "accept") decision_reason = poi_id ? POLICY_REASONS.overlappingName : POLICY_REASONS.noId;
   else if (new RegExp(EXCLUDED_STORE_LABEL.replaceAll("[[:space:]]", "\\s")).test(exclusionLabels)) { decision = "排除"; decision_reason = POLICY_REASONS.excludedLabel; }
   else if (relatedName && extremeEvidence) decision_reason = POLICY_REASONS.extreme;
   else if (new RegExp(HARD_NON_RETAIL_TAG).test(tags)) { decision = "排除"; decision_reason = POLICY_REASONS.hardCategory; }
@@ -218,6 +246,7 @@ export function assessBrandStore(brand: string, row: BrandPolicyPoi, override: A
   else if (override !== "accept" && brand === "零食有鸣" && new RegExp(REVIEW_CONVENIENCE).test(normalized_name)) decision_reason = POLICY_REASONS.convenience;
   else if (missingEvidence) decision_reason = POLICY_REASONS.missing;
   else if (override !== "accept" && hxlUnknownSuffix) decision_reason = POLICY_REASONS.hxlSuffix;
+  else if (usesConfirmedRetailReview(brand) && override !== "accept") decision_reason = POLICY_REASONS.name;
   else if (hxlRetailName && hxlRetailEvidence) { decision = "接受"; decision_reason = POLICY_REASONS.related; }
   else if (relatedName && relatedEvidence && !conflictingRelatedTags(tags, businessCategories)) { decision = "接受"; decision_reason = POLICY_REASONS.related; }
   else if (snackNamed) { decision = "接受"; decision_reason = POLICY_REASONS.accepted; }

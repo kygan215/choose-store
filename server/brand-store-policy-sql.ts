@@ -6,12 +6,14 @@ import { HXL_REVIEW_NAME, HXL_PRIMARY_PATTERN } from "../shared/brand-store-poli
 import {brandIdentityEvidenceNames} from "../shared/brand-store-policy.js";
 import {CLEAR_UNRELATED_BUSINESS} from "../shared/brand-store-policy.js";
 import {CONFIRMED_NON_CHAIN_NAME} from "../shared/brand-store-policy.js";
+import {CONFIRMED_ADDITIONAL_BRANDS} from "../shared/brand-store-policy.js";
 const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
 const repairedNameSql = NAME_REPAIRS.reduce((sql, [pattern, replacement]) =>
  `regexp_replace(${sql},${q(pattern)},${q(replacement.replace(/\$(\d)/g, "\\$1"))})`, "ailingshi_normalize(name)");
 const normalizedNameSql = `(CASE brand ${Object.keys(BRAND_IDENTITIES).map(brand =>
  `WHEN ${q(brand)} THEN regexp_replace(${repairedNameSql},${q(brandGeoPrefixPattern(brand))},${q("\\1")})`).join(" ")} ELSE ${repairedNameSql} END)`;
 const known = `brand_name IN (${Object.keys(BRAND_IDENTITIES).map(q).join(",")})`;
+const primaryForExclusionsSql = `(CASE brand ${CONFIRMED_ADDITIONAL_BRANDS.map(brand=>`WHEN ${q(brand)} THEN regexp_replace(split_part(n,'(',1),${q('^'+brand)},'')`).join(' ')} ELSE split_part(n,'(',1) END)`;
 const missingIdentitySql = `(btrim(split_part(n,'(',1))<>'' AND (CASE brand ${Object.keys(BRAND_IDENTITIES).map(brand=>`WHEN ${q(brand)} THEN (${brandIdentityEvidenceNames(brand).map(name=>`position(${q(name)} in split_part(n,'(',1))=0`).join(' AND ')})`).join(' ')} ELSE FALSE END))`;
 const genericCatering = `(pt LIKE '%' || ${q(GENERIC_CATERING_TYPE)} || '%' AND NOT EXISTS (SELECT 1 FROM unnest(string_to_array(pt,'|')) item WHERE item<>${q(GENERIC_CATERING_TYPE)} AND item !~ ${q(`^${SHOPPING_TYPE_FOR_CONFLICT}$`)}))`;
 const cakeWithRetailProof = `(tags ~ ${q(CAKE_TAG)} AND business_tags !~ ${q(CAKE_TAG)} AND tags !~ ${q(NON_TARGET_CATEGORY_TAG)} AND pt LIKE '%糕饼店%' AND NOT EXISTS (SELECT 1 FROM unnest(string_to_array(pt,'|')) item WHERE item NOT LIKE '%糕饼店%' AND item !~ ${q(`^${SHOPPING_TYPE_FOR_CONFLICT}$`)}))`;
@@ -21,13 +23,13 @@ const strictNameSql = `(CASE brand ${Object.keys(BRAND_IDENTITIES).map(brand=>`W
 const chainNameSql = `(${strictNameSql} AND n ~ ${q("(\\([^()]+店\\)|[-－][^()]+店|店)$")} AND split_part(n,'(',1) !~ ${q(SOFT_UNRELATED_NAME)} AND business_tags !~ ${q(CAKE_TAG)} AND (tags !~ ${q(NON_TARGET_CATEGORY_TAG)} OR (pt LIKE '%中餐厅%' AND business_snack)) AND (business_snack OR retail OR split_part(n,'(',1) ~ '品牌零食|零食乐园|量贩零食|省钱超市|批发超市|零食店|零食超市|硬折扣超市' OR (pt='生活服务;生活服务场所;生活服务场所' AND c ~ '(^|[|;,])070000([|;,]|$)')))`;
 const snackNameSql = `(clear_retail AND business_tags !~ ${q(CAKE_TAG)} AND split_part(n,'(',1) !~ ${q(`${SOFT_UNRELATED_NAME}|${LOCATION_BRANCH_BLOCK}`)} AND substring(n FROM length(split_part(n,'(',1))+1) !~ ${q(LOCATION_BRANCH_BLOCK)} AND (CASE brand ${Object.keys(BRAND_IDENTITIES).map(brand=>`WHEN ${q(brand)} THEN n ~ ${q(brandSnackNamePattern(brand))}`).join(" ")} ELSE FALSE END))`;
 const otherShopLandmarkSql = `(tags ~ ${q(OTHER_SHOP_TAG)} AND (CASE brand ${Object.entries(BRAND_IDENTITIES).map(([brand, names]) => `WHEN ${q(brand)} THEN (${names.map(name=>`position(${q(name)} in split_part(n,'(',1))=0`).join(' AND ')} AND (${names.map(name=>`position(${q(name)} in n)>0`).join(' OR ')}))`).join(' ')} ELSE FALSE END))`;
-const relatedNameSql = `(split_part(n,'(',1) !~ ${q(`${SOFT_UNRELATED_NAME}|${LOCATION_BRANCH_BLOCK}|${AMBIGUOUS_STORE_NAME}`)} AND substring(n FROM length(split_part(n,'(',1))+1) !~ ${q(LOCATION_BRANCH_BLOCK)} AND (CASE brand ${Object.keys(BRAND_IDENTITIES).map(brand => `WHEN ${q(brand)} THEN ((n ~ ${q(brandNamePattern(brand))} OR n ~ ${q(brandSnackNamePattern(brand))} OR n ~ ${q(brandRelatedNamePattern(brand))}) AND ${Object.entries(BRAND_IDENTITIES).filter(([other])=>other!==brand).flatMap(([,names])=>names.map(name=>`position(${q(name)} in split_part(n,'(',1))=0`)).join(' AND ')})`).join(' ')} ELSE FALSE END))`;
+const relatedNameSql = `(split_part(n,'(',1) !~ ${q(`${SOFT_UNRELATED_NAME}|${LOCATION_BRANCH_BLOCK}|${AMBIGUOUS_STORE_NAME}`)} AND substring(n FROM length(split_part(n,'(',1))+1) !~ ${q(LOCATION_BRANCH_BLOCK)} AND (CASE brand ${Object.keys(BRAND_IDENTITIES).map(brand => `WHEN ${q(brand)} THEN ((n ~ ${q(brandNamePattern(brand))} OR n ~ ${q(brandSnackNamePattern(brand))} OR n ~ ${q(brandRelatedNamePattern(brand))}) AND ${Object.entries(BRAND_IDENTITIES).filter(([other])=>other!==brand).flatMap(([,names])=>names.map(name=>`position(${q(name)} in other_primary)=0`)).join(' AND ')})`).join(' ')} ELSE FALSE END))`;
 const validRelatedNameSql = `(${relatedNameSql} AND n !~ ${q('\\([[:space:]]*店\\)')})`;
 const relatedConflictSql = `(tags ~ ${q(`${CAKE_TAG}|${NON_TARGET_CATEGORY_TAG}|住宿|医疗|公司|科教|商务住宅`)} AND NOT (business_tags ~ '(^|[;,])零食([;,]|$)' AND business_tags !~ ${q(CAKE_TAG)}))`;
 const hxlRetailSql = `(brand='好想来' AND position('好想来' in split_part(n,'(',1))>0
  AND n !~ ${q('\\([[:space:]]*(店)?\\)')}
  AND split_part(n,'(',1) !~ ${q(`${SOFT_UNRELATED_NAME}|${LOCATION_BRANCH_BLOCK}|${HXL_REVIEW_NAME}`)}
- AND ${Object.entries(BRAND_IDENTITIES).filter(([brand])=>brand!=='好想来').flatMap(([,names])=>names.map(name=>`position(${q(name)} in split_part(n,'(',1))=0`)).join(' AND ')}
+ AND ${Object.entries(BRAND_IDENTITIES).filter(([brand])=>brand!=='好想来').flatMap(([,names])=>names.map(name=>`position(${q(name)} in other_primary)=0`)).join(' AND ')}
  AND NOT (position(')' in n)>0 AND regexp_replace(n,'^.*\\)','') ~ ${q(`${UNRELATED_NAME}|${EXPLICIT_UNRELATED}`)})
  AND (CASE WHEN btrim(replace(business_tags,';',''))<>'' THEN business_tags ELSE pt END) ~ ${q(RELATED_STORE_TAG)}
  AND tags !~ ${q(EXTREME_STORE_TAG)} AND NOT ${relatedConflictSql})`;
@@ -36,6 +38,15 @@ const nameMatchSql = Object.keys(BRAND_IDENTITIES).map(brand => {
  const soft = ` OR (business_snack AND ${shoppingCategory} AND split_part(n,'(',1) !~ ${q(SOFT_UNRELATED_NAME)} AND n ~ ${q(brandBareBranchPattern(brand))}) OR (retail AND ${shoppingCategory} AND n ~ '^[^()]+\\([^()]+\\)$' AND split_part(n,'(',1) ~ ${q(brandLocationPrimaryPattern(brand))} AND split_part(split_part(n,'(',2),')',1) !~ ${q(LOCATION_BRANCH_BLOCK)})`;
  return `WHEN ${q(brand)} THEN (${strict}${soft})`;
 }).join("\n");
+const effectiveLabelsSql = `(CASE WHEN btrim(replace(business_tags,';',''))<>'' THEN business_tags ELSE pt END)`;
+const confirmedRetailNameSql = `(brand IN (${CONFIRMED_ADDITIONAL_BRANDS.map(q).join(',')})
+ AND ${primaryForExclusionsSql} !~ ${q(`${SOFT_UNRELATED_NAME}|${AMBIGUOUS_STORE_NAME}|${LOCATION_BRANCH_BLOCK}`)}
+ AND substring(n FROM length(split_part(n,'(',1))+1) !~ ${q(LOCATION_BRANCH_BLOCK)}
+ AND ((CASE brand ${nameMatchSql} ELSE FALSE END) OR (CASE brand ${CONFIRMED_ADDITIONAL_BRANDS.map(brand=>`WHEN ${q(brand)} THEN n ~ ${q(brandSnackNamePattern(brand))}`).join(' ')} ELSE FALSE END)))`;
+const confirmedMismatchSql = `(${effectiveLabelsSql} ~ ${q(`${CAKE_TAG}|${NON_TARGET_CATEGORY_TAG}|${CONFLICT_TAG}|${EXTREME_STORE_TAG}`)}
+ OR ${effectiveLabelsSql} ~ ${q(EXCLUDED_STORE_LABEL)}
+ OR (btrim(replace(business_tags,';',''))='' AND c ~ '(^|[|;,])(?!06[0-9]{4}([|;,]|$))[0-9]{6}([|;,]|$)'))`;
+const confirmedRetailEvidenceSql = `(${effectiveLabelsSql} ~ '零食|超市|购物|便利店|折扣店' OR (btrim(replace(business_tags,';',''))='' AND c ~ '(^|[|;,])06[0-9]{4}([|;,]|$)'))`;
 export const brandPolicyFunctionsSql = `
 CREATE OR REPLACE FUNCTION brand_policy_reason(brand text, name text, poi_id text, manual text, poi_type text, codes text, raw jsonb) RETURNS text
 LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
@@ -44,7 +55,8 @@ LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
  COALESCE(raw->>'tag','') || ';' || COALESCE(raw#>>'{business,tag}','') || ';' || COALESCE(raw#>>'{business,rectag}','') || ';' || COALESCE(raw#>>'{business,keytag}','') AS business_tags,
  COALESCE(poi_type,'') AS pt,
  regexp_replace(COALESCE(codes,''),'[[:space:]]','','g') AS c), flags AS (
- SELECT *, (tags ~ ${q(RETAIL_TAG)} OR c ~ '(^|[|;,])06[0-9]{4}([|;,]|$)') AS retail,
+ SELECT *, CASE WHEN starts_with(split_part(n,'(',1),brand) THEN substring(split_part(n,'(',1) FROM length(brand)+1) ELSE split_part(n,'(',1) END AS other_primary,
+ (tags ~ ${q(RETAIL_TAG)} OR c ~ '(^|[|;,])06[0-9]{4}([|;,]|$)') AS retail,
  tags ~ '零食' AS snack_evidence,
  business_tags ~ '(^|[;,])零食([;,]|$)' AS business_snack,
  tags ~ ${q(`(^|[;,|])[[:space:]]*(${CLEAR_RETAIL_LABEL})[[:space:]]*([;,|]|$)`)} AS clear_retail FROM evidence)
@@ -52,11 +64,18 @@ LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
  WHEN btrim(COALESCE(poi_id,''))<>'' AND manual='exclude' THEN ${q(R.blacklist)}
  WHEN source_name ~ ${q(INACTIVE_STATUS)} THEN ${q(R.inactive)}
  WHEN n ~ ${q(WAREHOUSE_BRANCH)} THEN ${q(R.warehouse)}
- WHEN split_part(n,'(',1) ~ ${q(`${UNRELATED_NAME}|${EXPLICIT_UNRELATED}|${CLEAR_UNRELATED_BUSINESS}`)} OR ${otherShopLandmarkSql} OR n ~ ${q(NON_STORE_BRANCH)} OR source_name ~ ${q(NON_STORE_TAIL)} THEN ${q(R.unrelated)}
+ WHEN ${primaryForExclusionsSql} ~ ${q(`${UNRELATED_NAME}|${EXPLICIT_UNRELATED}|${CLEAR_UNRELATED_BUSINESS}`)} OR ${otherShopLandmarkSql} OR n ~ ${q(NON_STORE_BRANCH)} OR source_name ~ ${q(NON_STORE_TAIL)} THEN ${q(R.unrelated)}
  WHEN (brand='爱零食' AND split_part(n,'(',1) ~ ${q(SIMILAR_NAME)}) OR (brand='好想来' AND n ~ '^好像来') THEN ${q(R.similar)}
  WHEN brand='好想来' AND split_part(n,'(',1) ~ ${q(HXL_NON_BRAND_NAME)} THEN ${q(R.hxlNonBrand)}
  WHEN split_part(n,'(',1) ~ ${q(CONFIRMED_NON_CHAIN_NAME)} THEN ${q(R.nonChain)}
  WHEN manual<>'accept' AND ${missingIdentitySql} THEN ${q(R.noBrand)}
+ WHEN ${confirmedRetailNameSql} THEN CASE
+  WHEN btrim(COALESCE(poi_id,''))='' THEN ${q(R.noId)}
+  WHEN btrim(replace(tags,';',''))='' AND c !~ '(^|[|;,])[0-9]{6}([|;,]|$)' THEN ${q(R.missing)}
+  WHEN ${confirmedMismatchSql} THEN ${q(R.confirmedMismatch)}
+  WHEN NOT ${confirmedRetailEvidenceSql} THEN ${q(R.tags)}
+  WHEN manual='accept' THEN ${q(R.manual)} ELSE ${q(R.accepted)} END
+ WHEN brand='爱零食' AND split_part(n,'(',1) ~ '^爱零食优选' AND manual<>'accept' THEN CASE WHEN btrim(COALESCE(poi_id,''))='' THEN ${q(R.noId)} ELSE ${q(R.overlappingName)} END
  WHEN (CASE WHEN btrim(replace(business_tags,';',''))<>'' THEN business_tags ELSE pt END) ~ ${q(EXCLUDED_STORE_LABEL)} THEN ${q(R.excludedLabel)}
  WHEN ${validRelatedNameSql} AND tags ~ ${q(EXTREME_STORE_TAG)} THEN ${q(R.extreme)}
  WHEN tags ~ ${q(HARD_NON_RETAIL_TAG)} THEN ${q(R.hardCategory)}
@@ -66,6 +85,7 @@ LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
  WHEN manual<>'accept' AND brand='零食有鸣' AND n ~ ${q(REVIEW_CONVENIENCE)} THEN ${q(R.convenience)}
  WHEN btrim(replace(tags,';',''))='' AND c !~ '(^|[|;,])[0-9]{6}([|;,]|$)' THEN ${q(R.missing)}
  WHEN manual<>'accept' AND brand='好想来' AND position('好想来' in split_part(n,'(',1))>0 AND (btrim(substring(split_part(n,'(',1) FROM position('好想来' in split_part(n,'(',1)))) !~ ${q(HXL_PRIMARY_PATTERN)} OR substring(split_part(n,'(',1) FROM position('好想来' in split_part(n,'(',1))+3) ~ ${q(HXL_REVIEW_NAME)}) THEN ${q(R.hxlSuffix)}
+ WHEN brand IN (${CONFIRMED_ADDITIONAL_BRANDS.map(q).join(',')}) AND manual<>'accept' THEN ${q(R.name)}
  WHEN ${hxlRetailSql} THEN ${q(R.related)}
  WHEN ${validRelatedNameSql} AND (tags ~ ${q(RELATED_STORE_TAG)} OR c ~ '(^|[|;,])(05|06)[0-9]{4}([|;,]|$)') AND NOT ${relatedConflictSql} THEN ${q(R.related)}
  WHEN ${snackNameSql} THEN ${q(R.accepted)}

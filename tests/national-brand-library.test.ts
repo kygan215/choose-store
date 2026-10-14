@@ -76,7 +76,9 @@ test("达到分页上限时不把全国任务误报为完整完成",async()=>{
 test("系统品牌名单只保留好想来，新增独立零食悦并禁止恢复废弃组合项",()=>{
   const names=DEFAULT_BRANDS.map(brand=>brand.name);
   for(const name of ["好想来","吖嘀吖嘀","陆小馋","零食悦"])assert.equal(names.filter(value=>value===name).length,1);
-  for(const name of ["好想来零食","好像来零食","零食优选","零食好能嗨"])assert.ok(!names.includes(name));
+  for(const name of ["好想来零食","好像来零食","零食好能嗨"])assert.ok(!names.includes(name));
+  assert.equal(names.filter(value=>value==="零食优选").length,1);
+  assert.equal(isRetiredSnackBrand("零食优选"),false);
   assert.equal(canonicalSnackBrand("好像来零食"),"好想来");
   assert.equal(isRetiredSnackBrand("零食优选，零食悦，零食好能嗨"),true);
   assert.equal(isRetiredSnackBrand("零食悦"),false);

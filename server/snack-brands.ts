@@ -1,3 +1,4 @@
+import {CONFIRMED_ADDITIONAL_BRANDS} from "../shared/brand-store-policy.js";
 export const DEFAULT_SNACK_BRANDS = [
   {name:"零食很忙",aliases:["零食很忙"]}, {name:"零食有鸣",aliases:["零食有鸣"]},
   {name:"赵一鸣零食",aliases:["赵一鸣零食","赵一鸣","赵一鸣省钱超市"]},
@@ -7,9 +8,10 @@ export const DEFAULT_SNACK_BRANDS = [
   {name:"老婆大人",aliases:["老婆大人"]}, {name:"陆小馋",aliases:["陆小馋"]},
   {name:"吖嘀吖嘀",aliases:["吖嘀吖嘀"]}, {name:"来伊份",aliases:["来伊份"]},
   {name:"零食悦",aliases:["零食悦"]}, {name:"养馋记",aliases:["养馋记"]},
+  ...CONFIRMED_ADDITIONAL_BRANDS.map(name => ({name,aliases:[name]})),
 ];
 export const LEGACY_HAOXIANGLAI = ["好想来零食","好像来零食","好像来"];
-export const RETIRED_SNACK_BRANDS = ["良品铺子","零食优选","零食好能嗨","零食很能嗨","零食优选、零食悦、零食很能嗨","零食优选、零食悦、零食好能嗨"];
+export const RETIRED_SNACK_BRANDS = ["良品铺子","零食好能嗨","零食很能嗨","零食优选、零食悦、零食很能嗨","零食优选、零食悦、零食好能嗨"];
 export function canonicalSnackBrand(name:string) {
   return LEGACY_HAOXIANGLAI.includes(name) ? "好想来" : name;
 }
