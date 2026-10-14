@@ -41,6 +41,8 @@ export const OTHER_SHOP_TAG = "鞋店|金店|珠宝|服饰鞋包|内衣|童装|�
 export const REVIEW_CONVENIENCE = "^零食有鸣便利(\\(|$)";
 export const SOFT_UNRELATED_NAME = "台球|棋牌|游乐|洗衣|家纺|家具|烟花|文具|眼镜|培训|果业|喜铺|喜礼|婚品|拖鞋|直播|代买|代购|朱砂";
 export const LOCATION_BRANCH_BLOCK = "暂停营业|装修中|停业|歇业|已关闭|仓库|仓$|客服|公司|总部|配送|办公|招商|面试";
+// User-confirmed name priority currently applies only to 优味多 branches.
+export const NAME_FIRST_BRANCH_REVIEW_TAG = `${EXTREME_STORE_TAG}|公司|工厂|培训|科教|住宅|住宿|日杂`;
 export const INACTIVE_STATUS = "暂停营业|装修中|正在装修|装修店铺|停业|歇业|已关闭|未开业|即将开业|待开业|筹备中|施工中";
 export const WAREHOUSE_BRANCH = "\\([^()]*(仓库|仓)\\)";
 export const POLICY_REASONS = {
@@ -55,6 +57,7 @@ export const POLICY_REASONS = {
   nonChain: "名称主体为用户确认的非目标连锁名称",
   overlappingName: "爱零食优选系列名称尚未确认，按用户要求待核验",
   confirmedMismatch: "正常品牌名称与分类或标签不符，按确认规则待核验",
+  nameFirstBranch: "优味多标准分店名称按用户规则优先接受；标签已放宽，未验证品牌归属",
   convenience: "零食有鸣便利名称按用户要求待核验",
   related: "品牌主体明确，购物／餐饮／便利店等相关证据通过初筛，未验证品牌归属",
   extreme: "名称疑似品牌门店，但分类或标签明显不相关，待核验",
@@ -104,6 +107,12 @@ export function brandNamePattern(brand: string) {
 export function brandBareBranchPattern(brand: string) {
   const names = BRAND_IDENTITIES[brand] || [brand];
   return `^(${names.map(escapeRegex).join("|")})[^()·,]{2,}店$`;
+}
+export function brandStandardBranchPattern(brand: string) {
+  const base = (BRAND_IDENTITIES[brand] || [brand]).map(escapeRegex).join("|");
+  const branches = "(?:\\((?!\\s*店\\))[^()]+店\\)){1,2}";
+  const suffix = usesConfirmedRetailReview(brand) ? `${RETAIL_SUFFIX}|折扣店` : RETAIL_SUFFIX;
+  return `^(${base})(?:(?:·?(${suffix}))?${branches}|[^()·,]{2,}店(?:${branches})?|[-－][^()]+店)$`;
 }
 export function brandLocationPrimaryPattern(brand: string) {
   const names = BRAND_IDENTITIES[brand] || [brand];
@@ -214,6 +223,12 @@ export function assessBrandStore(brand: string, row: BrandPolicyPoi, override: A
     || new RegExp(EXCLUDED_STORE_LABEL.replaceAll("[[:space:]]", "\\s")).test(exclusionLabels)
     || (!businessCategories.replace(/;/g, "").trim() && codes.some(c => /^\d{6}$/.test(c) && !/^06\d{4}$/.test(c)));
   const confirmedRetailEvidence = /零食|超市|购物|便利店|折扣店/.test(exclusionLabels) || (!businessCategories.replace(/;/g, "").trim() && codes.some(c => /^06\d{4}$/.test(c)));
+  const nameFirstBranch = brand === "优味多" && new RegExp(brandStandardBranchPattern(brand)).test(normalized_name)
+    && !new RegExp(`${SOFT_UNRELATED_NAME}|${AMBIGUOUS_STORE_NAME}|${LOCATION_BRANCH_BLOCK}`).test(primaryForExclusions)
+    && !new RegExp(LOCATION_BRANCH_BLOCK).test(normalized_name.slice(primary.length))
+    && !Object.entries(BRAND_IDENTITIES).some(([other,names]) => other !== brand && names.some(name => primaryForOtherBrands.includes(name)));
+  const nameFirstExtreme = new RegExp(NAME_FIRST_BRANCH_REVIEW_TAG).test(exclusionLabels)
+    || (!businessCategories.replace(/;/g, "").trim() && codes.some(c => /^(08|09|10|12|14|17)\d{4}$/.test(c)));
   let decision: "接受" | "排除" | "待核实" = "待核实", decision_reason: string;
   if (poi_id && override === "exclude") { decision = "排除"; decision_reason = POLICY_REASONS.blacklist; }
   else if (new RegExp(INACTIVE_STATUS).test(sourceName)) { decision = "排除"; decision_reason = POLICY_REASONS.inactive; }
@@ -226,6 +241,12 @@ export function assessBrandStore(brand: string, row: BrandPolicyPoi, override: A
   // with the actual brand in their primary name reviewable, not fuzzy hits or
   // landmarks. Explicit POI-ID confirmation can resolve an unrecognized alias.
   else if (override !== "accept" && primary.trim() && !brandIdentityEvidenceNames(brand).some(name => primary.includes(name))) { decision = "排除"; decision_reason = POLICY_REASONS.noBrand; }
+  else if (nameFirstBranch) {
+    if (!poi_id) decision_reason = POLICY_REASONS.noId;
+    else if (missingEvidence) decision_reason = POLICY_REASONS.missing;
+    else if (nameFirstExtreme) decision_reason = POLICY_REASONS.extreme;
+    else { decision = "接受"; decision_reason = POLICY_REASONS.nameFirstBranch; }
+  }
   // These ten brands have a user-confirmed evidence boundary: a normal chain
   // name with a conflicting label is reviewable, never accepted by broad retail
   // evidence or removed by the legacy hard-category rules below.

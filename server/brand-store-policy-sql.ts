@@ -7,6 +7,7 @@ import {brandIdentityEvidenceNames} from "../shared/brand-store-policy.js";
 import {CLEAR_UNRELATED_BUSINESS} from "../shared/brand-store-policy.js";
 import {CONFIRMED_NON_CHAIN_NAME} from "../shared/brand-store-policy.js";
 import {CONFIRMED_ADDITIONAL_BRANDS} from "../shared/brand-store-policy.js";
+import {brandStandardBranchPattern,NAME_FIRST_BRANCH_REVIEW_TAG} from "../shared/brand-store-policy.js";
 const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
 const repairedNameSql = NAME_REPAIRS.reduce((sql, [pattern, replacement]) =>
  `regexp_replace(${sql},${q(pattern)},${q(replacement.replace(/\$(\d)/g, "\\$1"))})`, "ailingshi_normalize(name)");
@@ -39,6 +40,11 @@ const nameMatchSql = Object.keys(BRAND_IDENTITIES).map(brand => {
  return `WHEN ${q(brand)} THEN (${strict}${soft})`;
 }).join("\n");
 const effectiveLabelsSql = `(CASE WHEN btrim(replace(business_tags,';',''))<>'' THEN business_tags ELSE pt END)`;
+const nameFirstBranchSql = `(brand='优味多' AND n ~ ${q(brandStandardBranchPattern('优味多'))}
+ AND ${primaryForExclusionsSql} !~ ${q(`${SOFT_UNRELATED_NAME}|${AMBIGUOUS_STORE_NAME}|${LOCATION_BRANCH_BLOCK}`)}
+ AND substring(n FROM length(split_part(n,'(',1))+1) !~ ${q(LOCATION_BRANCH_BLOCK)}
+ AND ${Object.entries(BRAND_IDENTITIES).filter(([brand])=>brand!=='优味多').flatMap(([,names])=>names.map(name=>`position(${q(name)} in other_primary)=0`)).join(' AND ')})`;
+const nameFirstExtremeSql = `(${effectiveLabelsSql} ~ ${q(NAME_FIRST_BRANCH_REVIEW_TAG)} OR (btrim(replace(business_tags,';',''))='' AND c ~ '(^|[|;,])(08|09|10|12|14|17)[0-9]{4}([|;,]|$)'))`;
 const confirmedRetailNameSql = `(brand IN (${CONFIRMED_ADDITIONAL_BRANDS.map(q).join(',')})
  AND ${primaryForExclusionsSql} !~ ${q(`${SOFT_UNRELATED_NAME}|${AMBIGUOUS_STORE_NAME}|${LOCATION_BRANCH_BLOCK}`)}
  AND substring(n FROM length(split_part(n,'(',1))+1) !~ ${q(LOCATION_BRANCH_BLOCK)}
@@ -69,6 +75,10 @@ LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
  WHEN brand='好想来' AND split_part(n,'(',1) ~ ${q(HXL_NON_BRAND_NAME)} THEN ${q(R.hxlNonBrand)}
  WHEN split_part(n,'(',1) ~ ${q(CONFIRMED_NON_CHAIN_NAME)} THEN ${q(R.nonChain)}
  WHEN manual<>'accept' AND ${missingIdentitySql} THEN ${q(R.noBrand)}
+ WHEN ${nameFirstBranchSql} THEN CASE
+  WHEN btrim(COALESCE(poi_id,''))='' THEN ${q(R.noId)}
+  WHEN btrim(replace(tags,';',''))='' AND c !~ '(^|[|;,])[0-9]{6}([|;,]|$)' THEN ${q(R.missing)}
+  WHEN ${nameFirstExtremeSql} THEN ${q(R.extreme)} ELSE ${q(R.nameFirstBranch)} END
  WHEN ${confirmedRetailNameSql} THEN CASE
   WHEN btrim(COALESCE(poi_id,''))='' THEN ${q(R.noId)}
   WHEN btrim(replace(tags,';',''))='' AND c !~ '(^|[|;,])[0-9]{6}([|;,]|$)' THEN ${q(R.missing)}
@@ -98,7 +108,7 @@ $$;
 CREATE OR REPLACE FUNCTION brand_policy_decision(brand text, name text, poi_id text, manual text, poi_type text, codes text, raw jsonb) RETURNS text
 LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
  SELECT CASE brand_policy_reason(brand,name,poi_id,manual,poi_type,codes,raw)
- WHEN ${q(R.accepted)} THEN '接受' WHEN ${q(R.manual)} THEN '接受' WHEN ${q(R.chain)} THEN '接受' WHEN ${q(R.related)} THEN '接受'
+ WHEN ${q(R.accepted)} THEN '接受' WHEN ${q(R.manual)} THEN '接受' WHEN ${q(R.chain)} THEN '接受' WHEN ${q(R.related)} THEN '接受' WHEN ${q(R.nameFirstBranch)} THEN '接受'
  ${[R.blacklist,R.inactive,R.warehouse,R.unrelated,R.similar,R.hardCategory,R.cake,R.category,R.hxlNonBrand,R.excludedLabel,R.noBrand,R.nonChain].map(r=>`WHEN ${q(r)} THEN '排除'`).join(" ")}
  ELSE '待核实' END
 $$;
