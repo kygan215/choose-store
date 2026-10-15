@@ -1,4 +1,4 @@
-import { assessBrandStore, BRAND_IDENTITIES, isPolicyBrand } from "../shared/brand-store-policy.js";
+import { assessBrandStore, brandSearchKeywords, isPolicyBrand } from "../shared/brand-store-policy.js";
 import { type AilingshiOverride } from "../shared/ailingshi.js";
 import { amapRating } from "../app/amap-rating.js";
 import { amapTel } from "../app/amap-contact.js";
@@ -202,7 +202,7 @@ function discoveryCandidate(raw:SearchRow,brand:string,terms:string[],manual:Ail
 
 export async function discoverBrandStores(amap:AmapSearch,brandInput:string,cityInput:string,districtInput="",options:{maxPagesPerRegion?:number;maxRequests?:number;aliases?:string[];overrides?:Record<string,AilingshiOverride>}={}):Promise<BrandStoreDiscoveryResult>{
   const brand=canonicalSnackBrand(clean(brandInput)),city=clean(cityInput),district=clean(districtInput);if(!brand)throw new Error("请输入品牌名称");if(isRetiredSnackBrand(brand))throw new Error("该品牌已从系统名单移除");if(!city)throw new Error("请输入城市");
-  const plan=buildStoreSearchPlan(brand,city,district),terms=isPolicyBrand(brand)?BRAND_IDENTITIES[brand]:unique([plan.brand||brand,...plan.brand_aliases,...(options.aliases||[]),brand]),maxPages=Math.max(1,Math.min(8,Number(options.maxPagesPerRegion||8))),maxRequests=Math.max(1,Math.min(500,Number(options.maxRequests||160))),pageSize=25;
+  const plan=buildStoreSearchPlan(brand,city,district),terms=isPolicyBrand(brand)?brandSearchKeywords(brand):unique([plan.brand||brand,...plan.brand_aliases,...(options.aliases||[]),brand]),maxPages=Math.max(1,Math.min(8,Number(options.maxPagesPerRegion||8))),maxRequests=Math.max(1,Math.min(500,Number(options.maxRequests||160))),pageSize=25;
   const municipality=["北京","天津","上海","重庆"].find(name=>withoutSuffix(city,["市"])===name);
   let requests=0,truncated=false;const regions:Array<{label:string;value:string}>=[];
   if(district)regions.push({label:district,value:district});

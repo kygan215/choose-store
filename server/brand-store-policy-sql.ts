@@ -7,7 +7,7 @@ import {brandIdentityEvidenceNames} from "../shared/brand-store-policy.js";
 import {CLEAR_UNRELATED_BUSINESS} from "../shared/brand-store-policy.js";
 import {CONFIRMED_NON_CHAIN_NAME} from "../shared/brand-store-policy.js";
 import {CONFIRMED_ADDITIONAL_BRANDS} from "../shared/brand-store-policy.js";
-import {brandStandardBranchPattern,NAME_FIRST_BRANCH_REVIEW_TAG} from "../shared/brand-store-policy.js";
+import {brandStandardBranchPattern,NAME_FIRST_BRANCH_REVIEW_TAG,HOTMAXX_OFFICIAL_NAME_PATTERN,HOTMAXX_REVERSE_NAME_PATTERN,HOTMAXX_SUPERMARKET_NAME_PATTERN,HOTMAXX_DAILY_BRANCH_PATTERN,HOTMAXX_CONFLICT_TAG,HOTMAXX_NON_STORE_BRANCH,HOTMAXX_MALL_LANDMARK_HINT,HOTMAXX_MALL_BRANCH_CONFLICT,ZERO_YOUXUAN_LOCATION_PREFIX,ZERO_YOUXUAN_NON_LOCATION_PREFIX,ZERO_YOUXUAN_SAVING_CONVENIENCE_NAME,ZERO_YOUXUAN_NON_STORE_NAME,ZERO_YOUXUAN_ZHAOSHANG_LANDMARK_NAME,ADDONE_UNRELATED_NAME} from "../shared/brand-store-policy.js";
 const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
 const repairedNameSql = NAME_REPAIRS.reduce((sql, [pattern, replacement]) =>
  `regexp_replace(${sql},${q(pattern)},${q(replacement.replace(/\$(\d)/g, "\\$1"))})`, "ailingshi_normalize(name)");
@@ -15,7 +15,9 @@ const normalizedNameSql = `(CASE brand ${Object.keys(BRAND_IDENTITIES).map(brand
  `WHEN ${q(brand)} THEN regexp_replace(${repairedNameSql},${q(brandGeoPrefixPattern(brand))},${q("\\1")})`).join(" ")} ELSE ${repairedNameSql} END)`;
 const known = `brand_name IN (${Object.keys(BRAND_IDENTITIES).map(q).join(",")})`;
 const primaryForExclusionsSql = `(CASE brand ${CONFIRMED_ADDITIONAL_BRANDS.map(brand=>`WHEN ${q(brand)} THEN regexp_replace(split_part(n,'(',1),${q('^'+brand)},'')`).join(' ')} ELSE split_part(n,'(',1) END)`;
-const missingIdentitySql = `(btrim(split_part(n,'(',1))<>'' AND (CASE brand ${Object.keys(BRAND_IDENTITIES).map(brand=>`WHEN ${q(brand)} THEN (${brandIdentityEvidenceNames(brand).map(name=>`position(${q(name)} in split_part(n,'(',1))=0`).join(' AND ')})`).join(' ')} ELSE FALSE END))`;
+const leadingPlaceBracketSql = `n ~ ${q('^\\([^()]*\\)')}`;
+const identityPrimarySql = `(CASE WHEN ${leadingPlaceBracketSql} THEN split_part(regexp_replace(n,${q('^\\([^()]*\\)')},''),'(',1) ELSE split_part(n,'(',1) END)`;
+const missingIdentitySql = `((btrim(split_part(n,'(',1))<>'' OR ${leadingPlaceBracketSql}) AND (CASE brand ${Object.keys(BRAND_IDENTITIES).map(brand=>`WHEN ${q(brand)} THEN (${brandIdentityEvidenceNames(brand).map(name=>`position(${q(name)} in ${identityPrimarySql})=0`).join(' AND ')})`).join(' ')} ELSE FALSE END))`;
 const genericCatering = `(pt LIKE '%' || ${q(GENERIC_CATERING_TYPE)} || '%' AND NOT EXISTS (SELECT 1 FROM unnest(string_to_array(pt,'|')) item WHERE item<>${q(GENERIC_CATERING_TYPE)} AND item !~ ${q(`^${SHOPPING_TYPE_FOR_CONFLICT}$`)}))`;
 const cakeWithRetailProof = `(tags ~ ${q(CAKE_TAG)} AND business_tags !~ ${q(CAKE_TAG)} AND tags !~ ${q(NON_TARGET_CATEGORY_TAG)} AND pt LIKE '%糕饼店%' AND NOT EXISTS (SELECT 1 FROM unnest(string_to_array(pt,'|')) item WHERE item NOT LIKE '%糕饼店%' AND item !~ ${q(`^${SHOPPING_TYPE_FOR_CONFLICT}$`)}))`;
 const resolvedConflict = `(business_snack AND ((${genericCatering} AND tags !~ ${q(NON_TARGET_CATEGORY_TAG)} AND tags !~ ${q(CAKE_TAG)}) OR ${cakeWithRetailProof}))`;
@@ -45,14 +47,41 @@ const nameFirstBranchSql = `(brand='优味多' AND n ~ ${q(brandStandardBranchPa
  AND substring(n FROM length(split_part(n,'(',1))+1) !~ ${q(LOCATION_BRANCH_BLOCK)}
  AND ${Object.entries(BRAND_IDENTITIES).filter(([brand])=>brand!=='优味多').flatMap(([,names])=>names.map(name=>`position(${q(name)} in other_primary)=0`)).join(' AND ')})`;
 const nameFirstExtremeSql = `(${effectiveLabelsSql} ~ ${q(NAME_FIRST_BRANCH_REVIEW_TAG)} OR (btrim(replace(business_tags,';',''))='' AND c ~ '(^|[|;,])(08|09|10|12|14|17)[0-9]{4}([|;,]|$)'))`;
+const shopping06Sql = `(EXISTS (SELECT 1 FROM unnest(string_to_array(pt,'|')) item WHERE btrim(item) ~ '^购物服务(;|$)')
+ AND c ~ '(^|[|;,])06[0-9]{4}([|;,]|$)')`;
+const zeroYouxuanZhaoshangLandmarkSql = `(brand='零食优选' AND n ~ ${q(ZERO_YOUXUAN_ZHAOSHANG_LANDMARK_NAME)} AND ${shopping06Sql})`;
 const confirmedRetailNameSql = `(brand IN (${CONFIRMED_ADDITIONAL_BRANDS.map(q).join(',')})
  AND ${primaryForExclusionsSql} !~ ${q(`${SOFT_UNRELATED_NAME}|${AMBIGUOUS_STORE_NAME}|${LOCATION_BRANCH_BLOCK}`)}
- AND substring(n FROM length(split_part(n,'(',1))+1) !~ ${q(LOCATION_BRANCH_BLOCK)}
- AND ((CASE brand ${nameMatchSql} ELSE FALSE END) OR (CASE brand ${CONFIRMED_ADDITIONAL_BRANDS.map(brand=>`WHEN ${q(brand)} THEN n ~ ${q(brandSnackNamePattern(brand))}`).join(' ')} ELSE FALSE END)))`;
+ AND (${zeroYouxuanZhaoshangLandmarkSql} OR substring(n FROM length(split_part(n,'(',1))+1) !~ ${q(LOCATION_BRANCH_BLOCK)})
+ AND ((CASE brand ${nameMatchSql} ELSE FALSE END) OR (CASE brand ${CONFIRMED_ADDITIONAL_BRANDS.map(brand=>`WHEN ${q(brand)} THEN n ~ ${q(brandSnackNamePattern(brand))}`).join(' ')} ELSE FALSE END)
+ OR (brand='零食优选' AND n ~ ${q(ZERO_YOUXUAN_SAVING_CONVENIENCE_NAME)}) OR ${zeroYouxuanZhaoshangLandmarkSql}))`;
 const confirmedMismatchSql = `(${effectiveLabelsSql} ~ ${q(`${CAKE_TAG}|${NON_TARGET_CATEGORY_TAG}|${CONFLICT_TAG}|${EXTREME_STORE_TAG}`)}
  OR ${effectiveLabelsSql} ~ ${q(EXCLUDED_STORE_LABEL)}
  OR (btrim(replace(business_tags,';',''))='' AND c ~ '(^|[|;,])(?!06[0-9]{4}([|;,]|$))[0-9]{6}([|;,]|$)'))`;
 const confirmedRetailEvidenceSql = `(${effectiveLabelsSql} ~ '零食|超市|购物|便利店|折扣店' OR (btrim(replace(business_tags,';',''))='' AND c ~ '(^|[|;,])06[0-9]{4}([|;,]|$)'))`;
+const hotmaxxStandardNameSql = `(brand='好特卖' AND n ~* ${q(`^${HOTMAXX_OFFICIAL_NAME_PATTERN}(?:[[:space:]]*\\((?![[:space:]]*店\\))[^()]+店\\)){0,2}$`)})`;
+const hotmaxxReverseNameSql = `(brand='好特卖' AND n ~* ${q(`^${HOTMAXX_REVERSE_NAME_PATTERN}(?:[[:space:]]*\\((?![[:space:]]*店\\))[^()]+店\\)){0,2}$`)})`;
+const hotmaxxSupermarketNameSql = `(brand='好特卖' AND n ~ ${q(HOTMAXX_SUPERMARKET_NAME_PATTERN.replaceAll('\\s','[[:space:]]'))})`;
+const hotmaxxSupermarketLabelSql = `business_tags ~ ${q('(^|[;,|])[[:space:]]*超市[[:space:]]*([;,|]|$)')}`;
+const hotmaxxMallBranchSql = `substring(n FROM ${q(`(?i)^${HOTMAXX_OFFICIAL_NAME_PATTERN}\\(([^()]+)\\)$`)})`;
+const hotmaxxSingleMallNameSql = `(brand='好特卖' AND btrim(COALESCE(${hotmaxxMallBranchSql},''))<>''
+ AND position('店' in ${hotmaxxMallBranchSql})=0
+ AND ${hotmaxxMallBranchSql} ~ ${q(HOTMAXX_MALL_LANDMARK_HINT)}
+ AND ${hotmaxxMallBranchSql} !~ ${q(HOTMAXX_MALL_BRANCH_CONFLICT)})`;
+const hotmaxxOfficialNameSql = `(${hotmaxxStandardNameSql} OR ${hotmaxxReverseNameSql} OR ${hotmaxxSingleMallNameSql})`;
+const hotmaxxConflictSql = `(tags ~ ${q(HOTMAXX_CONFLICT_TAG)} OR ${effectiveLabelsSql} ~ ${q(EXCLUDED_STORE_LABEL)}
+ OR (btrim(replace(business_tags,';',''))='' AND c ~ '(^|[|;,])(?!06[0-9]{4}([|;,]|$)|070000([|;,]|$))[0-9]{6}([|;,]|$)'))`;
+const hotmaxxDailyOnlySql = `(brand='好特卖' AND n ~* ${q(HOTMAXX_DAILY_BRANCH_PATTERN)} AND ${shopping06Sql}
+ AND tags ~ ${q('(^|[;,|])[[:space:]]*日杂店[[:space:]]*([;,|]|$)')}
+ AND tags !~ ${q(HOTMAXX_CONFLICT_TAG)}
+ AND tags !~ ${q(EXCLUDED_STORE_LABEL.replace('|日杂店',''))}
+ AND c !~ '(^|[|;,])(?!06[0-9]{4}([|;,]|$))[0-9]{6}([|;,]|$)')`;
+const hotmaxxRetailEvidenceSql = `(EXISTS (SELECT 1 FROM unnest(string_to_array(pt,'|')) item WHERE btrim(item) ~ '^购物服务(;|$)')
+ OR ${effectiveLabelsSql} ~ '零食|超市|购物' OR c ~ '(^|[|;,])06[0-9]{4}([|;,]|$)')`;
+const zeroYouxuanSourcePrimarySql = `split_part(source_name,'(',1)`;
+const zeroYouxuanPrefixSql = `btrim(left(${zeroYouxuanSourcePrimarySql},position('零食优选' in ${zeroYouxuanSourcePrimarySql})-1))`;
+const zeroYouxuanOtherShopPrefixSql = `(brand='零食优选' AND position('零食优选' in ${zeroYouxuanSourcePrimarySql})>1
+ AND (${zeroYouxuanPrefixSql} ~ ${q(ZERO_YOUXUAN_NON_LOCATION_PREFIX)} OR ${zeroYouxuanPrefixSql} !~ ${q(`^${ZERO_YOUXUAN_LOCATION_PREFIX}$`)}))`;
 export const brandPolicyFunctionsSql = `
 CREATE OR REPLACE FUNCTION brand_policy_reason(brand text, name text, poi_id text, manual text, poi_type text, codes text, raw jsonb) RETURNS text
 LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
@@ -70,6 +99,9 @@ LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
  WHEN manual='exclude' THEN CASE WHEN btrim(COALESCE(poi_id,''))<>'' THEN ${q(R.blacklist)} ELSE ${q(R.recordExclude)} END
  WHEN source_name ~ ${q(INACTIVE_STATUS)} THEN ${q(R.inactive)}
  WHEN n ~ ${q(WAREHOUSE_BRANCH)} THEN ${q(R.warehouse)}
+ WHEN ${hotmaxxOfficialNameSql} AND n ~ ${q(HOTMAXX_NON_STORE_BRANCH)} THEN ${q(R.hotmaxxNonStoreBranch)}
+ WHEN brand='零食优选' AND source_name ~ ${q(ZERO_YOUXUAN_NON_STORE_NAME)} THEN ${q(R.nonStoreEntity)}
+ WHEN brand='加一加' AND split_part(n,'(',1) ~ ${q(ADDONE_UNRELATED_NAME)} THEN ${q(R.unrelated)}
  WHEN ${primaryForExclusionsSql} ~ ${q(`${UNRELATED_NAME}|${EXPLICIT_UNRELATED}|${CLEAR_UNRELATED_BUSINESS}`)} OR ${otherShopLandmarkSql} OR n ~ ${q(NON_STORE_BRANCH)} OR source_name ~ ${q(NON_STORE_TAIL)} THEN ${q(R.unrelated)}
  WHEN (brand='爱零食' AND split_part(n,'(',1) ~ ${q(SIMILAR_NAME)}) OR (brand='好想来' AND n ~ '^好像来') THEN ${q(R.similar)}
  WHEN brand='好想来' AND split_part(n,'(',1) ~ ${q(HXL_NON_BRAND_NAME)} THEN ${q(R.hxlNonBrand)}
@@ -77,7 +109,21 @@ LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
  WHEN manual='accept' THEN CASE
   WHEN ${missingIdentitySql} AND (${[...new Set(Object.values(BRAND_IDENTITIES).flat())].map(name=>`position(${q(name)} in split_part(n,'(',1))>0`).join(' OR ')}) THEN ${q(R.noBrand)}
   ELSE CASE WHEN btrim(COALESCE(poi_id,''))<>'' THEN ${q(R.manual)} ELSE ${q(R.manualRecord)} END END
+ WHEN ${zeroYouxuanOtherShopPrefixSql} THEN ${q(R.otherShopPrefix)}
  WHEN manual<>'accept' AND ${missingIdentitySql} THEN ${q(R.noBrand)}
+ WHEN ${hotmaxxOfficialNameSql} THEN CASE
+  WHEN btrim(COALESCE(poi_id,''))='' THEN ${q(R.noId)}
+  WHEN btrim(replace(tags,';',''))='' AND c !~ '(^|[|;,])[0-9]{6}([|;,]|$)' THEN ${q(R.missing)}
+  WHEN ${hotmaxxConflictSql} AND NOT ${hotmaxxDailyOnlySql} THEN ${q(R.confirmedMismatch)}
+  WHEN (${hotmaxxSingleMallNameSql} OR ${hotmaxxReverseNameSql}) AND NOT ${shopping06Sql} THEN ${q(R.tags)}
+  WHEN NOT ${hotmaxxRetailEvidenceSql} THEN ${q(R.tags)}
+  ELSE ${q(R.hotmaxxOfficial)} END
+ WHEN ${hotmaxxSupermarketNameSql} THEN CASE
+  WHEN btrim(COALESCE(poi_id,''))='' THEN ${q(R.noId)}
+  WHEN btrim(replace(tags,';',''))='' AND c !~ '(^|[|;,])[0-9]{6}([|;,]|$)' THEN ${q(R.missing)}
+  WHEN ${hotmaxxConflictSql} THEN ${q(R.confirmedMismatch)}
+  WHEN NOT ${shopping06Sql} OR NOT ${hotmaxxSupermarketLabelSql} THEN ${q(R.tags)}
+  ELSE ${q(R.hotmaxxSupermarket)} END
  WHEN ${nameFirstBranchSql} THEN CASE
   WHEN btrim(COALESCE(poi_id,''))='' THEN ${q(R.noId)}
   WHEN btrim(replace(tags,';',''))='' AND c !~ '(^|[|;,])[0-9]{6}([|;,]|$)' THEN ${q(R.missing)}
@@ -111,8 +157,8 @@ $$;
 CREATE OR REPLACE FUNCTION brand_policy_decision(brand text, name text, poi_id text, manual text, poi_type text, codes text, raw jsonb) RETURNS text
 LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
  SELECT CASE brand_policy_reason(brand,name,poi_id,manual,poi_type,codes,raw)
- WHEN ${q(R.accepted)} THEN '接受' WHEN ${q(R.manual)} THEN '接受' WHEN ${q(R.manualRecord)} THEN '接受' WHEN ${q(R.chain)} THEN '接受' WHEN ${q(R.related)} THEN '接受' WHEN ${q(R.nameFirstBranch)} THEN '接受'
- ${[R.blacklist,R.recordExclude,R.inactive,R.warehouse,R.unrelated,R.similar,R.hardCategory,R.cake,R.category,R.hxlNonBrand,R.excludedLabel,R.noBrand,R.nonChain].map(r=>`WHEN ${q(r)} THEN '排除'`).join(" ")}
+ WHEN ${q(R.accepted)} THEN '接受' WHEN ${q(R.manual)} THEN '接受' WHEN ${q(R.manualRecord)} THEN '接受' WHEN ${q(R.chain)} THEN '接受' WHEN ${q(R.related)} THEN '接受' WHEN ${q(R.nameFirstBranch)} THEN '接受' WHEN ${q(R.hotmaxxOfficial)} THEN '接受' WHEN ${q(R.hotmaxxSupermarket)} THEN '接受'
+ ${[R.blacklist,R.recordExclude,R.inactive,R.warehouse,R.unrelated,R.similar,R.hardCategory,R.cake,R.category,R.hxlNonBrand,R.excludedLabel,R.noBrand,R.nonChain,R.otherShopPrefix,R.nonStoreEntity,R.hotmaxxNonStoreBranch].map(r=>`WHEN ${q(r)} THEN '排除'`).join(" ")}
  ELSE '待核实' END
 $$;
 `;

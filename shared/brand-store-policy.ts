@@ -43,6 +43,31 @@ export const SOFT_UNRELATED_NAME = "台球|棋牌|游乐|洗衣|家纺|家具|�
 export const LOCATION_BRANCH_BLOCK = "暂停营业|装修中|停业|歇业|已关闭|仓库|仓$|客服|公司|总部|配送|办公|招商|面试";
 // User-confirmed name priority currently applies only to 优味多 branches.
 export const NAME_FIRST_BRANCH_REVIEW_TAG = `${EXTREME_STORE_TAG}|公司|工厂|培训|科教|住宅|住宿|日杂`;
+// The official combined identity is a whole name body, not a free-text alias.
+// Keep apparel out of this conflict set: Amap often labels discount shops as
+// clothing under the shopping major category. Other incompatible evidence
+// still requires review even when the name is exact.
+export const HOTMAXX_OFFICIAL_NAME_PATTERN = "好特卖[[:space:]]*HotMaxx";
+// Reverse order is a separately gated complete identity: shopping 06 is required.
+export const HOTMAXX_REVERSE_NAME_PATTERN = "HotMaxx[[:space:]]*好特卖";
+export const HOTMAXX_SUPERMARKET_NAME_PATTERN = "^好特卖(?:折扣仓(?:储)?超市|临期超市)(?:\\((?!\\s*店\\))[^()]+店\\))?$";
+export const HOTMAXX_DAILY_BRANCH_PATTERN = `^${HOTMAXX_OFFICIAL_NAME_PATTERN}[[:space:]]*\\((?![[:space:]]*店\\))[^()]+店\\)$`;
+export const HOTMAXX_CONFLICT_TAG = `${CAKE_TAG}|${NON_TARGET_CATEGORY_TAG}|${CONFLICT_TAG}|${EXTREME_STORE_TAG.split("|").filter(label => label !== "服饰" && label !== "服装").join("|")}`;
+// Match an entire generic business-type branch, not a landmark such as 人民医院店.
+export const HOTMAXX_NON_STORE_BRANCH = "\\((?:按摩(?:养生|保健|理疗)?|足浴|足疗|蛋糕(?:烘焙|甜品)?|糕饼|烘焙|医院|诊所|药店|药房|女装(?:折扣|专卖)?|男装|服装)店\\)";
+// A single mall-place bracket without 店 needs both a place cue and Amap 06
+// shopping evidence. Do not extend the ordinary brand-name grammar with this.
+export const HOTMAXX_MALL_LANDMARK_HINT = "万优汇|广场|展贸|王府井|购物中心|商场|百货";
+export const HOTMAXX_MALL_BRANCH_CONFLICT = "按摩|足浴|足疗|蛋糕|糕饼|烘焙|医院|诊所|药店|药房|女装|男装|服装|公司|工厂|仓库|停业|装修|酒店|宾馆|住宅|宿舍|物流|停车场|出入口";
+// A different shop's leading name makes 零食优选 a generic descriptor, even
+// when Amap labels the POI as snacks. Place prefixes remain reviewable unless
+// an existing location + retail-branch format already matches the policy.
+export const ZERO_YOUXUAN_LOCATION_PREFIX = "(?:(?:[一-龥]{1,12}(?:省|市|县|区|镇|乡|村|路|街|大道|湖|溪|学院|学校|书院|府)){1,3}[-－·]?|古现|厦门|合肥|屏南|德化|滇南|衡阳|重庆秀山|玉屏康华大道|三都|瓮安弘扬世纪|长房云时代)";
+export const ZERO_YOUXUAN_NON_LOCATION_PREFIX = "超市|水果|鲜果|奶站|炒货|小铺|精品|全球|量贩|食品|零食|便利|采购|代购|代买";
+export const ZERO_YOUXUAN_SAVING_CONVENIENCE_NAME = "^零食优选省钱便利(?:\\((?!\\s*店\\))[^()]+店\\)){1,2}$";
+export const ZERO_YOUXUAN_NON_STORE_NAME = "^零食优选(?:\\([^()]*(?:分公司|工厂)\\)|工厂|\\([^()]+\\)(?:食品集团)?有限公司)$";
+export const ZERO_YOUXUAN_ZHAOSHANG_LANDMARK_NAME = "^零食优选省钱超市\\(招商·花园城锦园店\\)$";
+export const ADDONE_UNRELATED_NAME = "加一加(?:水电|卫浴工厂)$";
 export const INACTIVE_STATUS = "暂停营业|装修中|正在装修|装修店铺|停业|歇业|已关闭|未开业|即将开业|待开业|筹备中|施工中";
 export const WAREHOUSE_BRANCH = "\\([^()]*(仓库|仓)\\)";
 export const POLICY_REASONS = {
@@ -54,10 +79,15 @@ export const POLICY_REASONS = {
   hardCategory: "高德具体分类或标签明确为棋牌、垂钓、面馆、足浴或生鲜等非目标业态",
   noId: "缺少 POI ID，待核验", name: "名称未匹配品牌完整结构，待核验",
   noBrand: "名称主体没有目标品牌依据；其他品牌、普通店名或仅地标命中，不按该品牌收录",
+  otherShopPrefix: "名称以其他店名或业态开头，零食优选仅为后缀描述，不按目标连锁收录",
+  nonStoreEntity: "名称明确为分公司、工厂或公司主体，非营业门店",
   nonChain: "名称主体为用户确认的非目标连锁名称",
   overlappingName: "爱零食优选系列名称尚未确认，按用户要求待核验",
   confirmedMismatch: "正常品牌名称与分类或标签不符，按确认规则待核验",
   nameFirstBranch: "优味多标准分店名称按用户规则优先接受；标签已放宽，未验证品牌归属",
+  hotmaxxOfficial: "好特卖 HotMaxx 完整品牌主体和规范分店或商场地标有购物证据，服装子类不阻断初筛；未验证具体门店归属",
+  hotmaxxSupermarket: "好特卖折扣仓超市／临期超市完整名称、购物06编码与超市标签通过初筛；未验证具体门店归属",
+  hotmaxxNonStoreBranch: "好特卖 HotMaxx 分店括号为纯异业店型，按名称直接排除",
   convenience: "零食有鸣便利名称按用户要求待核验",
   related: "品牌主体明确，购物／餐饮／便利店等相关证据通过初筛，未验证品牌归属",
   extreme: "名称疑似品牌门店，但分类或标签明显不相关，待核验",
@@ -75,6 +105,8 @@ export const isPolicyBrand = (brand: string) => Object.hasOwn(BRAND_IDENTITIES, 
 export const usesConfirmedRetailReview = (brand: string) => (CONFIRMED_ADDITIONAL_BRANDS as readonly string[]).includes(brand);
 // 赵一鸣 is an already-supported screening alias, not an added search term.
 export const brandIdentityEvidenceNames = (brand: string) => brand === "赵一鸣零食" ? [...BRAND_IDENTITIES[brand], "赵一鸣"] : BRAND_IDENTITIES[brand] || [brand];
+// Name-recognition additions must not silently increase paid Amap keywords.
+export const brandSearchKeywords = (brand: string) => brand === "好特卖" ? [brand] : BRAND_IDENTITIES[brand] || [brand];
 const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 // Repairs only mechanical formatting; original_name remains untouched. Keep
 // these ordered replacements shared with PostgreSQL to avoid divergent results.
@@ -149,12 +181,24 @@ export function assessBrandStore(brand: string, row: BrandPolicyPoi, override: A
   const original_name = String(row.name ?? row.amap_name ?? ""), sourceName = normalizeAilingshiName(original_name);
   const normalized_name = brandMatchName(brand, sourceName);
   const poi_id = String(row.id ?? row.amap_poi_id ?? "").trim(), primary = normalized_name.split("(")[0];
+  // A leading place bracket is not the store's own name. Without this, an
+  // empty primary bypasses the brand-identity rejection below.
+  const leadingPlaceBracket = normalized_name.match(/^\([^()]*\)/);
+  const primaryForIdentity = leadingPlaceBracket ? normalized_name.slice(leadingPlaceBracket[0].length).split("(")[0].trim() : primary;
+  const zeroYouxuanSourcePrimary = sourceName.split("(")[0];
+  const zeroYouxuanBrandOffset = zeroYouxuanSourcePrimary.indexOf("零食优选");
+  const zeroYouxuanPrefix = zeroYouxuanBrandOffset > 0 ? zeroYouxuanSourcePrimary.slice(0, zeroYouxuanBrandOffset).trim() : "";
+  const zeroYouxuanOtherShopPrefix = brand === "零食优选" && zeroYouxuanBrandOffset > 0
+    && (new RegExp(ZERO_YOUXUAN_NON_LOCATION_PREFIX).test(zeroYouxuanPrefix)
+      || !new RegExp(`^${ZERO_YOUXUAN_LOCATION_PREFIX}$`).test(zeroYouxuanPrefix));
   const primaryForExclusions = usesConfirmedRetailReview(brand) ? primary.replace(new RegExp(`^${escapeRegex(brand)}`), "") : primary;
   // Compare other identities after the selected brand prefix, so 爱零食优选
   // does not become a cross-brand hit merely because 零食优选 was re-enabled.
   const primaryForOtherBrands = primary.startsWith(brand) ? primary.slice(brand.length) : primary;
   const tags = retailTags(row), codes = String(row.typecode ?? "").replace(/\s/g, "").split(/[|;,]/);
   const category = String(row.type ?? row.poi_type ?? "");
+  const shopping06Evidence = category.split("|").some(item => /^购物服务(?:;|$)/.test(item.trim()))
+    && codes.some(c => /^06\d{4}$/.test(c));
   const business = row.business && typeof row.business === "object" ? row.business as Record<string, unknown> : {};
   const businessSnack = [row.tag, business.tag, business.rectag, business.keytag]
     .some(value => String(value ?? "").split(/[;,]/).some(label => label.trim() === "零食"));
@@ -217,9 +261,12 @@ export function assessBrandStore(brand: string, row: BrandPolicyPoi, override: A
     && !(normalized_name.includes(")") && new RegExp(`${UNRELATED_NAME}|${EXPLICIT_UNRELATED}`).test(normalized_name.slice(normalized_name.lastIndexOf(")")+1)));
   const hxlRetailEvidence = new RegExp(RELATED_STORE_TAG).test(exclusionLabels)
     && !extremeEvidence && !conflictingRelatedTags(tags, businessCategories);
-  const confirmedRetailName = usesConfirmedRetailReview(brand) && (strictName || namedRetailBranch || namedRetailLocation || new RegExp(brandSnackNamePattern(brand)).test(normalized_name))
+  const zeroYouxuanZhaoshangLandmark = brand === "零食优选"
+    && new RegExp(ZERO_YOUXUAN_ZHAOSHANG_LANDMARK_NAME).test(normalized_name) && shopping06Evidence;
+  const confirmedRetailName = usesConfirmedRetailReview(brand) && (strictName || namedRetailBranch || namedRetailLocation || new RegExp(brandSnackNamePattern(brand)).test(normalized_name)
+    || (brand === "零食优选" && new RegExp(ZERO_YOUXUAN_SAVING_CONVENIENCE_NAME).test(normalized_name)) || zeroYouxuanZhaoshangLandmark)
     && !new RegExp(`${SOFT_UNRELATED_NAME}|${AMBIGUOUS_STORE_NAME}|${LOCATION_BRANCH_BLOCK}`).test(primaryForExclusions)
-    && !new RegExp(LOCATION_BRANCH_BLOCK).test(normalized_name.slice(primary.length));
+    && (zeroYouxuanZhaoshangLandmark || !new RegExp(LOCATION_BRANCH_BLOCK).test(normalized_name.slice(primary.length)));
   const confirmedMismatch = new RegExp(`${CAKE_TAG}|${NON_TARGET_CATEGORY_TAG}|${CONFLICT_TAG}|${EXTREME_STORE_TAG}`).test(exclusionLabels)
     || new RegExp(EXCLUDED_STORE_LABEL.replaceAll("[[:space:]]", "\\s")).test(exclusionLabels)
     || (!businessCategories.replace(/;/g, "").trim() && codes.some(c => /^\d{6}$/.test(c) && !/^06\d{4}$/.test(c)));
@@ -230,10 +277,43 @@ export function assessBrandStore(brand: string, row: BrandPolicyPoi, override: A
     && !Object.entries(BRAND_IDENTITIES).some(([other,names]) => other !== brand && names.some(name => primaryForOtherBrands.includes(name)));
   const nameFirstExtreme = new RegExp(NAME_FIRST_BRANCH_REVIEW_TAG).test(exclusionLabels)
     || (!businessCategories.replace(/;/g, "").trim() && codes.some(c => /^(08|09|10|12|14|17)\d{4}$/.test(c)));
+  const hotmaxxStandardName = brand === "好特卖" && new RegExp(
+    `^${HOTMAXX_OFFICIAL_NAME_PATTERN.replaceAll("[[:space:]]", "\\s")}(?:\\s*\\((?!\\s*店\\))[^()]+店\\)){0,2}$`, "i",
+  ).test(normalized_name);
+  const hotmaxxReverseName = brand === "好特卖" && new RegExp(
+    `^${HOTMAXX_REVERSE_NAME_PATTERN.replaceAll("[[:space:]]", "\\s")}(?:\\s*\\((?!\\s*店\\))[^()]+店\\)){0,2}$`, "i",
+  ).test(normalized_name);
+  const hotmaxxSupermarketName = brand === "好特卖" && new RegExp(HOTMAXX_SUPERMARKET_NAME_PATTERN).test(normalized_name);
+  const hotmaxxSupermarketLabel = [row.tag, business.tag, business.rectag, business.keytag]
+    .some(value => String(value ?? "").split(/[;,|]/).some(label => label.trim() === "超市"));
+  const hotmaxxDailyLabel = tags.split(/[;,|]/).some(label => label.trim() === "日杂店");
+  const hotmaxxOtherExcludedLabel = tags.split(/[;,|]/).map(label => label.trim()).filter(label => label && label !== "日杂店")
+    .some(label => new RegExp(EXCLUDED_STORE_LABEL.replaceAll("[[:space:]]", "\\s")).test(label));
+  const hotmaxxMallMatch = brand === "好特卖" && normalized_name.match(new RegExp(
+    `^${HOTMAXX_OFFICIAL_NAME_PATTERN.replaceAll("[[:space:]]", "\\s")}\\(([^()]+)\\)$`, "i",
+  ));
+  const hotmaxxMallBranch = hotmaxxMallMatch ? hotmaxxMallMatch[1] : "";
+  const hotmaxxSingleMallName = hotmaxxMallBranch.trim() !== "" && !hotmaxxMallBranch.includes("店")
+    && new RegExp(HOTMAXX_MALL_LANDMARK_HINT).test(hotmaxxMallBranch)
+    && !new RegExp(HOTMAXX_MALL_BRANCH_CONFLICT).test(hotmaxxMallBranch);
+  const hotmaxxOfficialName = hotmaxxStandardName || hotmaxxReverseName || hotmaxxSingleMallName;
+  const hotmaxxConflict = new RegExp(HOTMAXX_CONFLICT_TAG).test(tags)
+    || new RegExp(EXCLUDED_STORE_LABEL.replaceAll("[[:space:]]", "\\s")).test(exclusionLabels)
+    || (!businessCategories.replace(/;/g, "").trim() && codes.some(c => /^\d{6}$/.test(c) && !/^(06\d{4}|070000)$/.test(c)));
+  const hotmaxxDailyOnly = brand === "好特卖" && new RegExp(HOTMAXX_DAILY_BRANCH_PATTERN.replaceAll("[[:space:]]", "\\s"), "i").test(normalized_name)
+    && shopping06Evidence && hotmaxxDailyLabel
+    && !new RegExp(HOTMAXX_CONFLICT_TAG).test(tags)
+    && !hotmaxxOtherExcludedLabel
+    && !codes.some(c => /^\d{6}$/.test(c) && !/^06\d{4}$/.test(c));
+  const hotmaxxRetailEvidence = category.split("|").some(item => /^购物服务(?:;|$)/.test(item.trim()))
+    || /零食|超市|购物/.test(exclusionLabels) || codes.some(c => /^06\d{4}$/.test(c));
   let decision: "接受" | "排除" | "待核实" = "待核实", decision_reason: string;
   if (override === "exclude") { decision = "排除"; decision_reason = poi_id ? POLICY_REASONS.blacklist : POLICY_REASONS.recordExclude; }
   else if (new RegExp(INACTIVE_STATUS).test(sourceName)) { decision = "排除"; decision_reason = POLICY_REASONS.inactive; }
   else if (new RegExp(WAREHOUSE_BRANCH).test(normalized_name)) { decision = "排除"; decision_reason = POLICY_REASONS.warehouse; }
+  else if (hotmaxxOfficialName && new RegExp(HOTMAXX_NON_STORE_BRANCH).test(normalized_name)) { decision = "排除"; decision_reason = POLICY_REASONS.hotmaxxNonStoreBranch; }
+  else if (brand === "零食优选" && new RegExp(ZERO_YOUXUAN_NON_STORE_NAME).test(sourceName)) { decision = "排除"; decision_reason = POLICY_REASONS.nonStoreEntity; }
+  else if (brand === "加一加" && new RegExp(ADDONE_UNRELATED_NAME).test(primary)) { decision = "排除"; decision_reason = POLICY_REASONS.unrelated; }
   else if (new RegExp(`${UNRELATED_NAME}|${EXPLICIT_UNRELATED}|${CLEAR_UNRELATED_BUSINESS}`).test(primaryForExclusions) || otherShopLandmark || new RegExp(NON_STORE_BRANCH).test(normalized_name) || new RegExp(NON_STORE_TAIL).test(sourceName)) { decision = "排除"; decision_reason = POLICY_REASONS.unrelated; }
   else if ((brand === "爱零食" && new RegExp(SIMILAR_NAME).test(primary)) || (brand === "好想来" && /^好像来/.test(normalized_name))) { decision = "排除"; decision_reason = POLICY_REASONS.similar; }
   else if (brand === "好想来" && new RegExp(HXL_NON_BRAND_NAME).test(primary)) { decision = "排除"; decision_reason = POLICY_REASONS.hxlNonBrand; }
@@ -244,10 +324,26 @@ export function assessBrandStore(brand: string, row: BrandPolicyPoi, override: A
     if (!brandIdentityEvidenceNames(brand).some(name => primary.includes(name)) && Object.values(BRAND_IDENTITIES).flat().some(name => primary.includes(name))) { decision = "排除"; decision_reason = POLICY_REASONS.noBrand; }
     else { decision = "接受"; decision_reason = poi_id ? POLICY_REASONS.manual : POLICY_REASONS.manualRecord; }
   }
+  else if (zeroYouxuanOtherShopPrefix) { decision = "排除"; decision_reason = POLICY_REASONS.otherShopPrefix; }
   // Generic shopping/snack evidence is not brand identity. Keep unusual names
   // with the actual brand in their primary name reviewable, not fuzzy hits or
   // landmarks. Explicit POI-ID confirmation can resolve an unrecognized alias.
-  else if (primary.trim() && !brandIdentityEvidenceNames(brand).some(name => primary.includes(name))) { decision = "排除"; decision_reason = POLICY_REASONS.noBrand; }
+  else if ((primary.trim() || leadingPlaceBracket) && !brandIdentityEvidenceNames(brand).some(name => primaryForIdentity.includes(name))) { decision = "排除"; decision_reason = POLICY_REASONS.noBrand; }
+  else if (hotmaxxOfficialName) {
+    if (!poi_id) decision_reason = POLICY_REASONS.noId;
+    else if (missingEvidence) decision_reason = POLICY_REASONS.missing;
+    else if (hotmaxxConflict && !hotmaxxDailyOnly) decision_reason = POLICY_REASONS.confirmedMismatch;
+    else if ((hotmaxxSingleMallName || hotmaxxReverseName) && !shopping06Evidence) decision_reason = POLICY_REASONS.tags;
+    else if (!hotmaxxRetailEvidence) decision_reason = POLICY_REASONS.tags;
+    else { decision = "接受"; decision_reason = POLICY_REASONS.hotmaxxOfficial; }
+  }
+  else if (hotmaxxSupermarketName) {
+    if (!poi_id) decision_reason = POLICY_REASONS.noId;
+    else if (missingEvidence) decision_reason = POLICY_REASONS.missing;
+    else if (hotmaxxConflict) decision_reason = POLICY_REASONS.confirmedMismatch;
+    else if (!shopping06Evidence || !hotmaxxSupermarketLabel) decision_reason = POLICY_REASONS.tags;
+    else { decision = "接受"; decision_reason = POLICY_REASONS.hotmaxxSupermarket; }
+  }
   else if (nameFirstBranch) {
     if (!poi_id) decision_reason = POLICY_REASONS.noId;
     else if (missingEvidence) decision_reason = POLICY_REASONS.missing;
