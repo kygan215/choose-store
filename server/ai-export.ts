@@ -4,6 +4,8 @@ import { query } from "./db.js";
 import { buildBatchExportWorkbook, EXPORT_BASE_FIELDS, type ExportSelection } from "./batch-export.js";
 import { activityCacheKey, normalizeActivityConfig, resolveActivityConfig, validateActivityConfig, type ActivityConfig } from "./activity-ai.js";
 import { aggregateStore, generateAi, type Poi, type Row } from "./services.js";
+import { parseHistoryExportOptions } from "./history-export-options.js";
+import { assertHistoryExportPermission } from "./history-export-permission.js";
 
 export const AI_EXPORT_FIELDS:Set<string>=new Set(EXPORT_BASE_FIELDS.filter(field=>field.group==="AI 分析").map(field=>field.id));
 const EXPORT_ROOT=process.env.AI_EXPORT_DIR||path.resolve("outputs/ai-exports");
@@ -11,6 +13,7 @@ const EXPORT_ROOT=process.env.AI_EXPORT_DIR||path.resolve("outputs/ai-exports");
 export type AiExportRequest={
   job_ids:number[];store_ids:number[];fields:string[];radii:number[];categories:string[];
   include_poi_details:boolean;include_failures:boolean;include_notes:boolean;
+  include_history:boolean;history_start_date?:string;history_end_date?:string;
   activity_config?:ActivityConfig;activity_overrides?:Record<string,ActivityConfig>;
   user_email:string;job_names:string[];
 };
@@ -20,9 +23,10 @@ const uniqueStrings=(value:unknown)=>[...new Set((Array.isArray(value)?value:[])
 
 export function normalizeAiExportRequest(value:unknown):AiExportRequest{
   const row=(value&&typeof value==="object"?value:{}) as Record<string,unknown>;
+  const history=parseHistoryExportOptions(row);
   const overrides:Record<string,ActivityConfig>={};
   if(row.activity_overrides&&typeof row.activity_overrides==="object")for(const [key,item] of Object.entries(row.activity_overrides as Record<string,unknown>))overrides[String(Number(key))]=normalizeActivityConfig(item);
-  return {job_ids:uniqueNumbers(row.job_ids),store_ids:uniqueNumbers(row.store_ids),fields:uniqueStrings(row.fields),radii:uniqueNumbers(row.radii),categories:uniqueStrings(row.categories),include_poi_details:Boolean(row.include_poi_details),include_failures:row.include_failures!==false,include_notes:row.include_notes!==false,activity_config:resolveActivityConfig(row.activity_config),activity_overrides:overrides,user_email:String(row.user_email||""),job_names:uniqueStrings(row.job_names)};
+  return {job_ids:uniqueNumbers(row.job_ids),store_ids:uniqueNumbers(row.store_ids),fields:uniqueStrings(row.fields),radii:uniqueNumbers(row.radii),categories:uniqueStrings(row.categories),include_poi_details:Boolean(row.include_poi_details),include_failures:row.include_failures!==false,include_notes:row.include_notes!==false,include_history:history.includeHistory,history_start_date:history.historyStartDate,history_end_date:history.historyEndDate,activity_config:resolveActivityConfig(row.activity_config),activity_overrides:overrides,user_email:String(row.user_email||""),job_names:uniqueStrings(row.job_names)};
 }
 
 function activityFor(request:AiExportRequest,storeId:number){return normalizeActivityConfig(request.activity_overrides?.[String(storeId)]||request.activity_config)}
@@ -59,13 +63,15 @@ async function updateProgress(exportId:number,current=""){
 
 export async function processAiExport(exportId:number,tenantId:number,userId:number){
   const record=(await query<Row>("SELECT * FROM ai_export_jobs WHERE id=$1 AND tenant_id=$2 AND created_by=$3",[exportId,tenantId,userId])).rows[0];if(!record)throw new Error("AI导出任务不存在");const request=normalizeAiExportRequest(record.request_json);
+  if(request.include_history)await assertHistoryExportPermission(tenantId,userId);
   await query("UPDATE ai_export_jobs SET status='running',updated_at=NOW() WHERE id=$1",[exportId]);
   const children=(await query<Row>("SELECT es.*,s.input_name,s.job_id,s.pois_json,s.status AS store_status FROM ai_export_job_stores es JOIN stores s ON s.id=es.store_id WHERE es.export_job_id=$1 ORDER BY es.id",[exportId])).rows;
   for(const child of children){if(child.status!=="pending")continue;const control=(await query<Row>("SELECT control FROM ai_export_jobs WHERE id=$1",[exportId])).rows[0]?.control;if(control==="cancel")break;await updateProgress(exportId,String(child.input_name||""));try{const config=normalizeActivityConfig(child.activity_config_json),radii=request.radii.length?request.radii:[500],store=aggregateStore("门店A",child.pois_json as Poi[],radii),result=await generateAi(tenantId,userId,"single",[store],Number(child.job_id)||null,Number(child.store_id),[Number(child.store_id)],{activityConfig:config,cacheKey:String(child.cache_key||"")});await query("UPDATE ai_export_job_stores SET status='generated',ai_analysis_id=$1,attempts=attempts+1,error_message=NULL,updated_at=NOW() WHERE id=$2",[result.id,child.id])}catch(error){await query("UPDATE ai_export_job_stores SET status='failed',attempts=attempts+1,error_message=$1,updated_at=NOW() WHERE id=$2",[error instanceof Error?error.message:"AI生成失败",child.id])}await updateProgress(exportId)}
   const cancelled=(await query<Row>("SELECT control FROM ai_export_jobs WHERE id=$1",[exportId])).rows[0]?.control==="cancel";if(cancelled){await query("UPDATE ai_export_jobs SET status='cancelled',current_store='',completed_at=NOW(),updated_at=NOW() WHERE id=$1",[exportId]);return {cancelled:true}}
   const rows=await loadExportRows(tenantId,userId,request),aiRows=(await query<Row>("SELECT a.* FROM ai_export_job_stores es JOIN ai_analyses a ON a.id=es.ai_analysis_id WHERE es.export_job_id=$1",[exportId])).rows,errors=(await query<Row>("SELECT store_id,status,error_message FROM ai_export_job_stores WHERE export_job_id=$1 AND status IN ('failed','skipped')",[exportId])).rows;
   for(const item of errors)aiRows.push({store_id:item.store_id,result_json:{summary:item.status==="skipped"?item.error_message:`AI生成失败：${item.error_message||"未知原因"}`}});
-  const selection:ExportSelection={jobIds:request.job_ids,storeIds:request.store_ids,fields:request.fields,radii:request.radii,categories:request.categories,includePoiDetails:request.include_poi_details,includeFailures:request.include_failures,includeNotes:request.include_notes},buffer=await buildBatchExportWorkbook(rows,aiRows,selection,{userEmail:request.user_email,jobNames:request.job_names});
+  if(request.include_history)await assertHistoryExportPermission(tenantId,userId);
+  const selection:ExportSelection={jobIds:request.job_ids,storeIds:request.store_ids,fields:request.fields,radii:request.radii,categories:request.categories,includePoiDetails:request.include_poi_details,includeFailures:request.include_failures,includeNotes:request.include_notes,includeHistory:request.include_history,historyStartDate:request.history_start_date,historyEndDate:request.history_end_date},buffer=await buildBatchExportWorkbook(rows,aiRows,selection,{userEmail:request.user_email,jobNames:request.job_names,tenantId});
   await fs.mkdir(EXPORT_ROOT,{recursive:true});const filePath=path.join(EXPORT_ROOT,`ai-export-${exportId}.xlsx`);await fs.writeFile(filePath,buffer);await updateProgress(exportId);await query("UPDATE ai_export_jobs SET status='completed',file_path=$1,file_expires_at=NOW()+INTERVAL '7 days',current_store='',completed_at=NOW(),updated_at=NOW() WHERE id=$2",[filePath,exportId]);return {filePath};
 }
 
