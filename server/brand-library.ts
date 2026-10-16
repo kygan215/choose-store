@@ -18,6 +18,7 @@ import { getHistoricalExportData } from "./history-export-data.js";
 import { parseHistoryExportOptions, type HistoryExportOptions } from "./history-export-options.js";
 import { addHistoricalDetailSheet, HISTORY_SUMMARY_HEADERS, historyRefundBasisByStore, historySummaryCells } from "./history-export-workbook.js";
 import { assertHistoryExportPermission } from "./history-export-permission.js";
+import {createDiscoveryMonitor,quietDiscoveryMonitor,type DiscoveryMonitor} from "./discovery-monitor.js";
 
 export const PROVINCES=["全国","北京市","天津市","河北省","山西省","内蒙古自治区","辽宁省","吉林省","黑龙江省","上海市","江苏省","浙江省","安徽省","福建省","江西省","山东省","河南省","湖北省","湖南省","广东省","广西壮族自治区","海南省","重庆市","四川省","贵州省","云南省","西藏自治区","陕西省","甘肃省","青海省","宁夏回族自治区","新疆维吾尔自治区","香港特别行政区","澳门特别行政区","台湾省"];
 export const DEFAULT_BRANDS=DEFAULT_SNACK_BRANDS;
@@ -56,6 +57,7 @@ export function quotaResumeDelay(){const now=new Date(),beijing=new Date(now.get
 async function scheduleDiscoveryResume(jobId:number,tenantId:number,userId:number){const {taskQueue}=await import("./queue.js");await taskQueue.add("discover-brand-stores",{jobId,tenantId,userId},{attempts:1,delay:quotaResumeDelay()})}
 
 export async function cleanupBrandLibraryRetention(tenantId:number){
+  await query("DELETE FROM brand_discovery_events WHERE tenant_id=$1 AND created_at<NOW()-INTERVAL '30 days'",[tenantId]);
   const expired=(await query<Row>("SELECT id,file_path FROM brand_export_jobs WHERE tenant_id=$1 AND file_expires_at<=NOW()",[tenantId])).rows;
   for(const item of expired)if(item.file_path)await fs.rm(String(item.file_path),{force:true}).catch(()=>undefined);
   await query("DELETE FROM brand_export_jobs WHERE tenant_id=$1 AND file_expires_at<=NOW()",[tenantId]);
@@ -64,12 +66,13 @@ export async function cleanupBrandLibraryRetention(tenantId:number){
   return {expired_exports:expired.length};
 }
 
-export async function saveDiscoveredStores(tenantId:number,jobId:number|null,brand:string,province:string,city:string,stores:Row[],complete:boolean,runQuery:DiscoveryQuery=query){
+export async function saveDiscoveredStores(tenantId:number,jobId:number|null,brand:string,province:string,city:string,stores:Row[],complete:boolean,runQuery:DiscoveryQuery=query,onProgress?:(saved:number,total:number)=>Promise<void>){
   const seen:string[]=[];
+  let lastReported=Date.now();
   // A real POI may arrive after an ID-less address suggestion in another page.
   // Save identified POIs first, then archive only strict same-name/coordinate duplicates.
   const orderedStores=[...stores].sort((a,b)=>Number(Boolean(clean(b.id)))-Number(Boolean(clean(a.id))));
-  for(const store of orderedStores){if(!isPolicyBrand(brand)&&!canRetainSnackStore(store,brand))continue;const uid=clean(store.id)||(isPolicyBrand(brand)?`brand-missing:${createHash("sha256").update(JSON.stringify([store.name,store.address,store.location])).digest("hex")}|${brand}`:`${brand}|${clean(store.name)}|${Array.isArray(store.location)?store.location.join(","):""}`),location=Array.isArray(store.location)?store.location:[null,null];if(!uid||(!isPolicyBrand(brand)&&(location[0]==null||location[1]==null)))continue;const saved=await runQuery("INSERT INTO brand_stores(tenant_id,brand_name,source_uid,amap_poi_id,amap_name,province,city,district,address,longitude,latitude,poi_type,typecode,data_status,raw_json,last_job_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'新增',$14,$15) ON CONFLICT(tenant_id,source_uid) DO UPDATE SET brand_name=EXCLUDED.brand_name,amap_poi_id=EXCLUDED.amap_poi_id,amap_name=EXCLUDED.amap_name,province=EXCLUDED.province,city=EXCLUDED.city,district=EXCLUDED.district,address=EXCLUDED.address,longitude=EXCLUDED.longitude,latitude=EXCLUDED.latitude,poi_type=EXCLUDED.poi_type,typecode=EXCLUDED.typecode,data_status=CASE WHEN brand_stores.amap_name IS DISTINCT FROM EXCLUDED.amap_name OR brand_stores.address IS DISTINCT FROM EXCLUDED.address OR brand_stores.longitude IS DISTINCT FROM EXCLUDED.longitude OR brand_stores.latitude IS DISTINCT FROM EXCLUDED.latitude THEN '更新' ELSE '正常' END,raw_json=EXCLUDED.raw_json,last_job_id=EXCLUDED.last_job_id,last_seen_at=NOW(),updated_at=NOW() WHERE brand_stores.deleted_at IS NULL AND NOT (brand_stores.brand_name<>EXCLUDED.brand_name AND ((brand_stores.library_visible AND NOT EXCLUDED.library_visible) OR brand_stores.ailingshi_override='accept')) RETURNING id",[tenantId,brand,uid,clean(store.id),String(store.name??""),clean(store.province)||province,clean(store.city)||city,clean(store.district),clean(store.address),location[0]==null?null:Number(location[0]),location[1]==null?null:Number(location[1]),clean(store.type),clean(store.typecode),JSON.stringify(store),jobId]);if(saved.rows.length)seen.push(uid)}
+  for(const store of orderedStores){if(!isPolicyBrand(brand)&&!canRetainSnackStore(store,brand))continue;const uid=clean(store.id)||(isPolicyBrand(brand)?`brand-missing:${createHash("sha256").update(JSON.stringify([store.name,store.address,store.location])).digest("hex")}|${brand}`:`${brand}|${clean(store.name)}|${Array.isArray(store.location)?store.location.join(","):""}`),location=Array.isArray(store.location)?store.location:[null,null];if(!uid||(!isPolicyBrand(brand)&&(location[0]==null||location[1]==null)))continue;const saved=await runQuery("INSERT INTO brand_stores(tenant_id,brand_name,source_uid,amap_poi_id,amap_name,province,city,district,address,longitude,latitude,poi_type,typecode,data_status,raw_json,last_job_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'新增',$14,$15) ON CONFLICT(tenant_id,source_uid) DO UPDATE SET brand_name=EXCLUDED.brand_name,amap_poi_id=EXCLUDED.amap_poi_id,amap_name=EXCLUDED.amap_name,province=EXCLUDED.province,city=EXCLUDED.city,district=EXCLUDED.district,address=EXCLUDED.address,longitude=EXCLUDED.longitude,latitude=EXCLUDED.latitude,poi_type=EXCLUDED.poi_type,typecode=EXCLUDED.typecode,data_status=CASE WHEN brand_stores.amap_name IS DISTINCT FROM EXCLUDED.amap_name OR brand_stores.address IS DISTINCT FROM EXCLUDED.address OR brand_stores.longitude IS DISTINCT FROM EXCLUDED.longitude OR brand_stores.latitude IS DISTINCT FROM EXCLUDED.latitude THEN '更新' ELSE '正常' END,raw_json=EXCLUDED.raw_json,last_job_id=EXCLUDED.last_job_id,last_seen_at=NOW(),updated_at=NOW() WHERE brand_stores.deleted_at IS NULL AND NOT (brand_stores.brand_name<>EXCLUDED.brand_name AND ((brand_stores.library_visible AND NOT EXCLUDED.library_visible) OR brand_stores.ailingshi_override='accept')) RETURNING id",[tenantId,brand,uid,clean(store.id),String(store.name??""),clean(store.province)||province,clean(store.city)||city,clean(store.district),clean(store.address),location[0]==null?null:Number(location[0]),location[1]==null?null:Number(location[1]),clean(store.type),clean(store.typecode),JSON.stringify(store),jobId]);if(saved.rows.length)seen.push(uid);if(onProgress&&(seen.length===1||seen.length%10===0||Date.now()-lastReported>=3000)){await onProgress(seen.length,orderedStores.length);lastReported=Date.now()}}
   if(stores.length)await archiveExactMissingPoiDuplicates(tenantId,brand,city,runQuery);
   if(complete)await runQuery("UPDATE brand_stores SET data_status='疑似关闭',updated_at=NOW() WHERE tenant_id=$1 AND brand_name=$2 AND province=$3 AND city=$4 AND last_job_id IS DISTINCT FROM $5 AND deleted_at IS NULL AND data_status<>'数据异常'",[tenantId,brand,province,city,jobId]);
   await runQuery("UPDATE brand_dashboard_snapshots SET invalidated_at=NOW() WHERE tenant_id=$1",[tenantId]);
@@ -79,18 +82,27 @@ export async function saveDiscoveredStores(tenantId:number,jobId:number|null,bra
 }
 
 type DiscoveryQuery=(text:string,values?:unknown[])=>Promise<{rows:Row[];rowCount?:number|null}>;
-export type DiscoveryJobDependencies={concurrency?:number;query?:DiscoveryQuery;listProvinceCities?:typeof listProvinceCities;consumeBackgroundQuota?:typeof consumeBackgroundQuota;discoverBrandStores?:typeof discoverBrandStores;saveDiscoveredStores?:typeof saveDiscoveredStores};
+export type DiscoveryJobDependencies={concurrency?:number;query?:DiscoveryQuery;listProvinceCities?:typeof listProvinceCities;consumeBackgroundQuota?:typeof consumeBackgroundQuota;discoverBrandStores?:typeof discoverBrandStores;saveDiscoveredStores?:typeof saveDiscoveredStores;monitor?:DiscoveryMonitor};
 
 export async function processDiscoveryJob(jobId:number,tenantId:number,userId:number,dependencies:DiscoveryJobDependencies={}){
+  const monitor=dependencies.monitor||(dependencies.query?quietDiscoveryMonitor:createDiscoveryMonitor(jobId,tenantId));
+  try{return await runDiscoveryJob(jobId,tenantId,userId,{...dependencies,monitor})}
+  catch(error){await monitor.event("error","failed",error instanceof Error?error.message:"后台任务执行失败");throw error}
+  finally{await monitor.finish()}
+}
+async function runDiscoveryJob(jobId:number,tenantId:number,userId:number,dependencies:DiscoveryJobDependencies){
+  const monitor=dependencies.monitor!;
   const runQuery=dependencies.query||(query as DiscoveryQuery),loadProvinceCities=dependencies.listProvinceCities||listProvinceCities,consumeQuota=dependencies.consumeBackgroundQuota||consumeBackgroundQuota,discover=dependencies.discoverBrandStores||discoverBrandStores,save=dependencies.saveDiscoveredStores||saveDiscoveredStores;
   const record=(await runQuery("SELECT * FROM brand_discovery_jobs WHERE id=$1 AND tenant_id=$2 AND created_by=$3",[jobId,tenantId,userId])).rows[0];if(!record)throw new Error("品牌查询任务不存在");if(record.control==="pause"&&record.status==="已暂停")return;let cities=uniqueStrings(record.cities_json),apiCalls=Number(record.api_calls||0);const errors:string[]=[];
   await runQuery("UPDATE brand_discovery_jobs SET status='正在读取区域',started_at=COALESCE(started_at,NOW()),updated_at=NOW() WHERE id=$1",[jobId]);
+  await monitor.event("info","started","后台开始读取查询区域");
   const nationwide=record.province==="全国",regions:Array<{province:string;city:string}>=[];
   if(nationwide)cities=[];
   const provinces=nationwide?PROVINCES.filter(province=>province!=="全国"):[clean(record.province)];
   for(const province of provinces){
     if((await runQuery("SELECT * FROM brand_discovery_jobs WHERE id=$1",[jobId])).rows[0]?.control!=="run")return;
     await runQuery("UPDATE brand_discovery_jobs SET current_region=$1,updated_at=NOW() WHERE id=$2",[province+" · 正在读取城市",jobId]);
+    await monitor.unit("regions",{stage:"regions",province});
     let regionCities=nationwide?[]:cities;
     if(!regionCities.length){try{
       await consumeQuota(tenantId,{userId,sourceType:"brand_discovery",sourceId:jobId,operation:"province_city_lookup",details:{province}});apiCalls++;
@@ -100,6 +112,7 @@ export async function processDiscoveryJob(jobId:number,tenantId:number,userId:nu
     for(const city of regionCities)regions.push({province,city});
     if(!nationwide)cities=regionCities;
   }
+  await monitor.unit("regions",null);
   const brands=uniqueStrings(uniqueStrings(record.brands_json).map(canonicalSnackBrand)).filter(name=>!isRetiredSnackBrand(name)),catalog=(await runQuery("SELECT standard_name,aliases_json FROM brand_catalog WHERE tenant_id=$1 AND standard_name=ANY($2::text[])",[tenantId,brands])).rows,brandAliases=new Map(catalog.map(item=>[clean(item.standard_name),uniqueStrings(item.aliases_json)])),total=regions.length*brands.length;await runQuery("UPDATE brand_discovery_jobs SET cities_json=$1,total_units=$2,processed_units=0,cached_units=0,status='正在查询',api_calls=$3,updated_at=NOW() WHERE id=$4 AND control='run'",[JSON.stringify(cities),total,apiCalls,jobId]);
   const concurrency=concurrencyLimit(dependencies.concurrency??process.env.BRAND_DISCOVERY_CONCURRENCY,1,12);
   let stopped=false;
@@ -108,21 +121,32 @@ export async function processDiscoveryJob(jobId:number,tenantId:number,userId:nu
     const state=(await runQuery("SELECT * FROM brand_discovery_jobs WHERE id=$1",[jobId])).rows[0];
     if(state?.control!=="run"){stopped=true;return}
     const current=`${province} · ${city} · ${brand}${concurrency>1?`（${concurrency}组并行）`:""}`;
+    const unitKey=JSON.stringify([province,city,brand]),unitDetails={province,city,brand},unitStarted=Date.now();
+    await monitor.unit(unitKey,{...unitDetails,stage:"searching"});
+    await monitor.event("info","unit_started","开始查询城市门店",unitDetails);
     await runQuery("UPDATE brand_discovery_jobs SET current_region=$1,updated_at=NOW() WHERE id=$2 AND control='run'",[current,jobId]);
     const cache=(await runQuery("SELECT * FROM brand_region_cache WHERE tenant_id=$1 AND brand_name=ANY($2::text[]) AND province=$3 AND city=$4 AND refreshed_at>NOW()-INTERVAL '30 days' ORDER BY refreshed_at DESC LIMIT 1",[tenantId,brand==="好想来"?[brand,...LEGACY_HAOXIANGLAI]:[brand],province,city])).rows[0];
     if(cache&&!state.force_refresh){
+      await monitor.event("info","cache","复用已有城市查询缓存",unitDetails);
       if(!cache.complete&&!errors.some(message=>message.startsWith("已复用部分缓存")))errors.push("已复用部分缓存，已有门店可直接使用；如需重新检索或补全，请勾选忽略30天缓存");
       await runQuery(`UPDATE brand_discovery_jobs SET processed_units=processed_units+1,cached_units=cached_units+1,found_stores=(SELECT COUNT(*) FROM brand_stores WHERE library_visible AND deleted_at IS NULL AND tenant_id=$1 AND brand_name=ANY($2::text[]) AND ($3='全国' OR province=$3) AND (cardinality($4::text[])=0 OR city=ANY($4::text[]))),updated_at=NOW() WHERE id=$5`,[tenantId,brands,state.province,cities,jobId]);
-      return;
+      await monitor.unit(unitKey,null);return;
     }
     let unitCalls=0;
     try {
       const overrides:Record<string,AilingshiOverride>=isPolicyBrand(brand)?Object.fromEntries((await runQuery("SELECT poi_id,decision FROM ailingshi_poi_overrides WHERE tenant_id=$1",[tenantId])).rows.map(row=>[row.poi_id,row.decision])):{};
       const result=await discover(brand,city,"",async(path,params)=>{
         await consumeQuota(tenantId,{userId,sourceType:"brand_discovery",sourceId:jobId,operation:"brand_store_search",details:{province,city,brand,path,page:params.page_num||params.page}});
-        unitCalls++;return amapRequest(path,params);
+        unitCalls++;const details={...unitDetails,path,page:params.page_num||params.page||1},requestStarted=Date.now();
+        await monitor.unit(unitKey,{...details,stage:"request"});
+        try{const data=await amapRequest(path,params);await monitor.event("info","request_complete","高德请求完成",{...details,duration_ms:Date.now()-requestStarted,returned:Array.isArray(data.pois)?data.pois.length:0});return data}
+        catch(error){await monitor.event("error","request_error",error instanceof Error?error.message:"高德请求失败",{...details,duration_ms:Date.now()-requestStarted});throw error}
       },brandAliases.get(brand)||[brand],overrides);
-      await save(tenantId,jobId,brand,province,city,result.assessments||result.stores,result.complete);
+      const stores=result.assessments||result.stores;
+      await monitor.event("info","saving","正在保存城市门店数据",{...unitDetails,total:stores.length});
+      await monitor.unit(unitKey,{...unitDetails,stage:"saving",saved:0,total:stores.length});
+      await save(tenantId,jobId,brand,province,city,stores,result.complete,runQuery,async(saved,total)=>{await monitor.unit(unitKey,{...unitDetails,stage:"saving",saved,total});await monitor.event("info","save_progress","城市门店入库进度",{...unitDetails,saved,total})});
+      await monitor.event(result.complete?"info":"warn","unit_complete",result.complete?"城市查询和入库完成":"城市查询完成，但受分页或请求上限影响，结果不完整",{...unitDetails,duration_ms:Date.now()-unitStarted,total:stores.length});
       if(!result.complete)errors.push(`${current}：检索达到分页或请求上限，结果未完整`);
       await runQuery(`UPDATE brand_discovery_jobs SET processed_units=processed_units+1,api_calls=api_calls+$1,found_stores=(SELECT COUNT(*) FROM brand_stores WHERE library_visible AND deleted_at IS NULL AND tenant_id=$2 AND brand_name=ANY($3::text[]) AND ($4='全国' OR province=$4) AND (cardinality($5::text[])=0 OR city=ANY($5::text[]))),error_message=$6,updated_at=NOW() WHERE id=$7`,[unitCalls,tenantId,brands,state.province,cities,errors.slice(-20).join("；")||null,jobId]);
     } catch(error) {
@@ -132,11 +156,13 @@ export async function processDiscoveryJob(jobId:number,tenantId:number,userId:nu
         return;
       }
       errors.push(`${current}：${error instanceof Error?error.message:"查询失败"}`);
+      await monitor.event("error","unit_error",error instanceof Error?error.message:"城市查询失败",unitDetails);
       await runQuery("UPDATE brand_discovery_jobs SET processed_units=processed_units+1,api_calls=api_calls+$1,error_message=$2,updated_at=NOW() WHERE id=$3",[unitCalls,errors.slice(-20).join("；"),jobId]);
-    }
+    }finally{await monitor.unit(unitKey,null)}
   });
   if(stopped||(await runQuery("SELECT * FROM brand_discovery_jobs WHERE id=$1",[jobId])).rows[0]?.control!=="run")return;
   const count=Number((await runQuery(`SELECT COUNT(*) count FROM brand_stores WHERE library_visible AND deleted_at IS NULL AND tenant_id=$1 AND brand_name=ANY($2::text[]) AND ($3='全国' OR province=$3) AND (cardinality($4::text[])=0 OR city=ANY($4::text[]))`,[tenantId,brands,record.province,cities])).rows[0]?.count||0);await runQuery("UPDATE brand_discovery_jobs SET status=$1,control='idle',found_stores=$2,current_region='',completed_at=NOW(),error_message=$4,updated_at=NOW() WHERE id=$3",[errors.length?"部分完成":"已完成",count,jobId,errors.join("；")||null]);
+  await monitor.event(errors.length?"warn":"info","completed",errors.length?"本次查询部分完成，请查看错误或分页上限提示":"本次查询已完成");
 }
 
 export type BrandStoreFilter={brand?:string;brands?:string[];province?:string;provinces?:string[];city?:string;cities?:string[];district?:string;keyword?:string;status?:string;analyzed?:string;review_status?:string;page?:number;page_size?:number};

@@ -57,4 +57,6 @@ const worker=new Worker("store-analysis",processJob,{connection:redisConnection,
 await taskQueue.upsertJobScheduler(DASHBOARD_JOB,DASHBOARD_SCHEDULE,{name:DASHBOARD_JOB,data:{},opts:{attempts:3,backoff:{type:"exponential",delay:30000}}});
 await taskQueue.add(DASHBOARD_JOB,{}, {jobId:"brand-dashboard-startup",removeOnComplete:true,removeOnFail:true});
 
-async function stop(){await worker.close();process.exit(0)}process.on("SIGTERM",stop);process.on("SIGINT",stop);
+const reportWorkerHeartbeat=async()=>{try{const {getMonitorRedis}=await import("./discovery-monitor.js");await (await getMonitorRedis()).set("storemap:worker:heartbeat",JSON.stringify({at:new Date().toISOString()}),"EX",45)}catch{console.error(JSON.stringify({event:"worker_heartbeat_unavailable"}))}};
+const heartbeatTimer=setInterval(()=>void reportWorkerHeartbeat(),10_000);heartbeatTimer.unref();void reportWorkerHeartbeat();
+async function stop(){clearInterval(heartbeatTimer);await worker.close();process.exit(0)}process.on("SIGTERM",stop);process.on("SIGINT",stop);
