@@ -1,9 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {duplicateEventRows,duplicateSourceStoreRows,identityMismatch,sourceCellIdentityIssues} from "../server/history-routes.js";
+import {duplicateEventRows,duplicateSourceStoreRows,historyCandidateNameKey,identityMismatch,sourceCellIdentityIssues} from "../server/history-routes.js";
 
 const event=(row_number:number,start_date="2025-10-01")=>({row_number,column_index:3,start_date,end_date:"2025-10-07"});
 const store=(row_number:number,name:string,poi_id:string,more:Record<string,unknown>={})=>({row_number,name,brand:"好想来",province:"湖北省",city:"武汉市",poi_id,address:"",history_store_id:undefined,brand_store_id:undefined,...more});
+
+test("历史门店名称省市紧接品牌时仍能召回括号格式的品牌库候选",()=>{
+  // Production has this exact history/library name pair. Old bidirectional
+  // substring search missed it because the library name inserts parentheses.
+  const source="零食很忙湖北鄂州鄂城吴王广场店",library="零食很忙(湖北鄂州鄂城吴王广场店)";
+  assert.equal(source.includes(library)||library.includes(source),false);
+  assert.equal(historyCandidateNameKey(source),historyCandidateNameKey(library));
+  assert.equal(historyCandidateNameKey("零食很忙（ 湖北鄂州鄂城吴王广场店 ）"),historyCandidateNameKey(source));
+  assert.notEqual(historyCandidateNameKey("零食很忙湖北鄂州鄂城吴王广场二店"),historyCandidateNameKey(source));
+});
 
 test("同一唯一 POI 的不同原始店名，同日期活动不得重复累计",()=>{
   const rows=[store(2,"湖北武汉一店","P-123"),store(3,"湖北武汉新店名","P-123")];
