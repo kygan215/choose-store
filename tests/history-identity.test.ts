@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {duplicateEventRows,duplicateSourceStoreRows,identityMismatch} from "../server/history-routes.js";
+import {duplicateEventRows,duplicateSourceStoreRows,identityMismatch,sourceCellIdentityIssues} from "../server/history-routes.js";
 
 const event=(row_number:number,start_date="2025-10-01")=>({row_number,column_index:3,start_date,end_date:"2025-10-07"});
 const store=(row_number:number,name:string,poi_id:string,more:Record<string,unknown>={})=>({row_number,name,brand:"好想来",province:"湖北省",city:"武汉市",poi_id,address:"",history_store_id:undefined,brand_store_id:undefined,...more});
@@ -31,4 +31,14 @@ test("同一 POI 分散在不同原始行，即使日期不同也不能建立两
   assert.equal(duplicateSourceStoreRows(rows as never).length,1);
   const confirmed=rows.map(row=>({...row,history_store_id:9}));
   assert.equal(duplicateSourceStoreRows(confirmed as never).length,0);
+});
+
+test("同一文件单元格重导入时，身份或日期变更须先人工核对",()=>{
+  const prior={row_number:5,column_index:2,history_store_id:17,identity_key:"old-key",brand_store_id:null,prior_start_date:"2026-10-01",prior_end_date:"2026-10-07",brand_name:"零食很忙",store_name:"旧名称",province:"湖北省",city:"武汉市"};
+  const incoming={...event(5,"2026-10-01"),column_index:2,end_date:"2026-10-07"};
+  const changed={...store(5,"新名称",""),identity_key:"new-key",brand:"零食很忙"};
+  assert.equal(sourceCellIdentityIssues([prior],[incoming] as never,[changed] as never).length,1);
+  assert.equal(sourceCellIdentityIssues([prior],[incoming] as never,[{...changed,history_store_id:17}] as never).length,0);
+  assert.equal(sourceCellIdentityIssues([prior],[{...incoming,start_date:"2026-10-02"}] as never,[{...changed,history_store_id:17}] as never).length,1);
+  assert.equal(sourceCellIdentityIssues([prior],[incoming] as never,[{...changed,identity_key:"old-key"}] as never).length,0);
 });
