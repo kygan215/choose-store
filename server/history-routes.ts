@@ -3,6 +3,7 @@ import {Router, type Request, type Response, type NextFunction} from "express";
 import multer from "multer";
 import type {PoolClient} from "pg";
 import {pool,query} from "./db.js";
+import {resolveStoreCandidates} from "./services.js";
 import {canAccessHistory} from "./history-export-data.js";
 import {calendarTags,dateRangeHeader,historyIdentity,parseHistoryWorkbook,salesAmount,validDate,type HistoryParsed,type HistorySourceRow} from "./history-parse.js";
 
@@ -57,6 +58,20 @@ type Candidate={id:number;brand_name:string;amap_name:string;province:string;cit
 // workbook's "零食很忙湖北…店" can find a library POI named "零食很忙(湖北…店)".
 export function historyCandidateNameKey(value:unknown){return str(value).normalize("NFKC").toLowerCase().replace(/[\s()（）·•—_-]/g,"")}
 const candidateNameSql="regexp_replace(lower(normalize(b.amap_name, NFKC)), '[[:space:]()（）·•—_-]+', '', 'g')";
+export function historyAmapLibraryCandidates(source:{brand_name:unknown;province:unknown;city:unknown},poi:DataRow,library:Candidate[]){
+  return library.filter(item=>item.amap_poi_id===poi.id&&item.brand_name===source.brand_name&&(!source.province||item.province===source.province)&&(!source.city||item.city===source.city)&&(!poi.province||item.province===poi.province)&&(!poi.city||item.city===poi.city));
+}
+router.post("/stores/:id/amap-candidates",requireAdmin,wrap(async(req,res)=>{
+  const id=positiveId(req.params.id),tenantId=req.user!.tenantId;
+  const source=(await query<{brand_name:string;store_name:string;province:string;city:string;address:string;poi_id:string|null}>("SELECT brand_name,store_name,province,city,address,poi_id FROM history_stores WHERE tenant_id=$1 AND id=$2",[tenantId,id])).rows[0];
+  if(!source)return bad(res,"历史门店不存在",404);
+  const name=str(req.body?.q)||str(source.store_name);if(!name||name.length>100)return bad(res,"门店搜索名称须为 1 至 100 个字符");
+  const found=await resolveStoreCandidates({originalName:name,searchName:name,province:source.province,city:source.city,address:source.address,poiId:/^B[A-Z0-9]{9}$/i.test(name)?name:str(req.body?.q)?"":str(source.poi_id)});
+  const pois=[...new Map(found.filter(item=>item.id&&!/^(COORD-|GEOCODE-)/i.test(String(item.id))&&item.source!=="amap_geocode").map(item=>[String(item.id),item])).values()].slice(0,10);
+  const ids=pois.map(item=>String(item.id));
+  const library=ids.length?(await query<Candidate>("SELECT id,brand_name,amap_name,province,city,address,amap_poi_id FROM brand_stores WHERE tenant_id=$1 AND amap_poi_id=ANY($2::text[])",[tenantId,ids])).rows.map(item=>({...item,id:Number(item.id)})):[];
+  return respond(res,{rows:pois.map(item=>({id:item.id,name:item.name,province:item.province,city:item.city,district:item.district,address:item.address,type:item.type,score:item.score,reasons:item.reasons||[],conflicts:item.conflicts||[],warnings:item.warnings||[],library_candidates:historyAmapLibraryCandidates(source,item,library)}))},"高德候选已返回，请核对后人工确认；查询不会修改历史活动关联");
+}));
 router.get("/brand-stores/search",requireAdmin,wrap(async(req,res)=>{
   const tenantId=req.user!.tenantId,q=str(req.query.q),brand=str(req.query.brand),province=str(req.query.province),city=str(req.query.city);
   if(!q&&!brand&&!province&&!city)return bad(res,"请输入门店名称、地址或 POI ID，或选择品牌和地区");

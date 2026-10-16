@@ -1,9 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {duplicateEventRows,duplicateSourceStoreRows,historyCandidateNameKey,identityMismatch,sourceCellIdentityIssues} from "../server/history-routes.js";
+import {duplicateEventRows,duplicateSourceStoreRows,historyCandidateNameKey,historyAmapLibraryCandidates,identityMismatch,sourceCellIdentityIssues} from "../server/history-routes.js";
 
 const event=(row_number:number,start_date="2025-10-01")=>({row_number,column_index:3,start_date,end_date:"2025-10-07"});
 const store=(row_number:number,name:string,poi_id:string,more:Record<string,unknown>={})=>({row_number,name,brand:"好想来",province:"湖北省",city:"武汉市",poi_id,address:"",history_store_id:undefined,brand_store_id:undefined,...more});
+
+test("高德实时候选只提供相同 POI 且品牌地区兼容的库中门店，不按名称推断关联",()=>{
+  const source={brand_name:"零食很忙",province:"湖北省",city:"宜昌市"},poi={id:"B0MU1SINDX",province:"湖北省",city:"宜昌市"};
+  const candidate={id:1,brand_name:"零食很忙",amap_name:"零食很忙(湖北宜昌长阳榔坪镇店)",province:"湖北省",city:"宜昌市",address:"榔坪镇",amap_poi_id:"B0MU1SINDX"};
+  assert.deepEqual(historyAmapLibraryCandidates(source,poi,[candidate]),[candidate]);
+  assert.deepEqual(historyAmapLibraryCandidates(source,poi,[{...candidate,amap_poi_id:"B0OTHER"},{...candidate,brand_name:"好想来"},{...candidate,city:"武汉市"}]),[]);
+  assert.deepEqual(historyAmapLibraryCandidates(source,{...poi,city:"武汉市"},[candidate]),[]);
+  assert.deepEqual(historyAmapLibraryCandidates(source,poi,[]),[]);
+});
 
 test("历史门店名称省市紧接品牌时仍能召回括号格式的品牌库候选",()=>{
   // Production has this exact history/library name pair. Old bidirectional
