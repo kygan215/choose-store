@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {processDiscoveryJob} from "../server/brand-library.js";
+import {discoveryConcurrency,processDiscoveryJob} from "../server/brand-library.js";
 import {discoveryHealth,safeDiscoveryMessage} from "../server/discovery-monitor.js";
 
 test("城市尚未完成时也上报入库阶段和已保存条数，避免进度看似停住",async()=>{
@@ -36,4 +36,11 @@ test("有心跳但两分钟无新进展应提示排查，暂停和完成不误�
 test("日志不能暴露高德密钥、令牌或密码",()=>{
   const text=safeDiscoveryMessage("https://restapi.amap.com/v5?key=private-key&city=武汉 token=abc password=private-password Authorization=Bearer-abc");
   assert.ok(!text.includes("private-key"));assert.ok(!text.includes("private-password"));assert.ok(!text.includes("Bearer-abc"));
+});
+
+test("8组品牌查询不能挤占只有5个连接且同时运行2个任务的Worker连接池",()=>{
+  assert.equal(discoveryConcurrency(8,5,2),1);
+  assert.equal(discoveryConcurrency(8,10,2),4);
+  assert.equal(discoveryConcurrency(1,10,2),1);
+  assert.equal(discoveryConcurrency(8,1,5),1);
 });

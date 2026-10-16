@@ -83,6 +83,12 @@ export async function saveDiscoveredStores(tenantId:number,jobId:number|null,bra
 
 type DiscoveryQuery=(text:string,values?:unknown[])=>Promise<{rows:Row[];rowCount?:number|null}>;
 export type DiscoveryJobDependencies={concurrency?:number;query?:DiscoveryQuery;listProvinceCities?:typeof listProvinceCities;consumeBackgroundQuota?:typeof consumeBackgroundQuota;discoverBrandStores?:typeof discoverBrandStores;saveDiscoveredStores?:typeof saveDiscoveredStores;monitor?:DiscoveryMonitor};
+export function discoveryConcurrency(requested:unknown,poolSize:unknown=process.env.DB_POOL_SIZE,workerSlots:unknown=process.env.WORKER_CONCURRENCY){
+  // Reserve connections for control/status and divide the remaining budget
+  // across the Worker's simultaneously running jobs.
+  const budget=Math.max(1,Math.floor((concurrencyLimit(poolSize,20,1000)-2)/concurrencyLimit(workerSlots,3,5)));
+  return Math.min(concurrencyLimit(requested,1,12),budget);
+}
 
 export async function processDiscoveryJob(jobId:number,tenantId:number,userId:number,dependencies:DiscoveryJobDependencies={}){
   const monitor=dependencies.monitor||(dependencies.query?quietDiscoveryMonitor:createDiscoveryMonitor(jobId,tenantId));
@@ -114,7 +120,7 @@ async function runDiscoveryJob(jobId:number,tenantId:number,userId:number,depend
   }
   await monitor.unit("regions",null);
   const brands=uniqueStrings(uniqueStrings(record.brands_json).map(canonicalSnackBrand)).filter(name=>!isRetiredSnackBrand(name)),catalog=(await runQuery("SELECT standard_name,aliases_json FROM brand_catalog WHERE tenant_id=$1 AND standard_name=ANY($2::text[])",[tenantId,brands])).rows,brandAliases=new Map(catalog.map(item=>[clean(item.standard_name),uniqueStrings(item.aliases_json)])),total=regions.length*brands.length;await runQuery("UPDATE brand_discovery_jobs SET cities_json=$1,total_units=$2,processed_units=0,cached_units=0,status='正在查询',api_calls=$3,updated_at=NOW() WHERE id=$4 AND control='run'",[JSON.stringify(cities),total,apiCalls,jobId]);
-  const concurrency=concurrencyLimit(dependencies.concurrency??process.env.BRAND_DISCOVERY_CONCURRENCY,1,12);
+  const concurrency=dependencies.concurrency!==undefined?concurrencyLimit(dependencies.concurrency,1,12):discoveryConcurrency(process.env.BRAND_DISCOVERY_CONCURRENCY);
   let stopped=false;
   await forEachConcurrent(regions.flatMap(region=>brands.map(brand=>({...region,brand}))),concurrency,async({province,city,brand})=>{
     if(stopped)return;

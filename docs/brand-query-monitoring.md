@@ -23,3 +23,5 @@ docker stats --no-stream
 ```
 
 后台日志出现 `discovery_log_unavailable` 或 `discovery_heartbeat_unavailable` 时，分别检查数据库迁移与 Redis 连接。监控写入失败不会把业务查询直接标成成功或强制重跑。
+
+品牌查询并行度会按 Worker 数据库连接池大小限制，为控制和状态查询预留连接，并考虑 Worker 同时运行的任务数。此次排查发现旧配置是连接池 5、Worker 并发任务 2、城市并行 8；高 CPU 入库期间会导致连接等待超时。新的上限避免继续按这个配置挤占连接池；旧任务的失败城市仍须在结果中明确保留，不能标为完整搜齐。
