@@ -38,11 +38,12 @@ export async function searchCandidates(input:string,city="",district="",address=
 }
 
 export async function resolveStoreCandidates(input:Partial<StoreResolutionInput>&Row,request:typeof amap=amap){
-  const directPoiId=clean(input.poiId||input.poi_id),longitude=Number(input.longitude),latitude=Number(input.latitude),baseName=clean(input.searchName||input.name||input.originalName),address=clean(input.address);
+  const baseName=clean(input.searchName||input.name||input.originalName),nameIsPoi=/^B[A-Z0-9]{9}$/i.test(baseName),directPoiId=clean(input.poiId||input.poi_id||(nameIsPoi?baseName:"")).toUpperCase(),longitude=Number(input.longitude),latitude=Number(input.latitude),address=clean(input.address);
   if(directPoiId){
-    const data=await request("/v5/place/detail",{id:directPoiId,show_fields:"business,navi,photos"}),rows=Array.isArray(data.pois)?data.pois as Row[]:[];
-    const found=rows.length?await searchStoreCandidates(async()=>({status:"1",pois:rows}),baseName||clean(rows[0].name),clean(input.city),clean(input.district),address,1):[];
-    if(found[0]){found[0].score=100;found[0].reasons.unshift("用户提供的高德 POI ID 完全一致");found[0].auto_confirm=!found[0].requires_review;found[0].status=found[0].requires_review?"标签待核验":"高置信度";return found}
+    const data=await request("/v5/place/detail",{id:directPoiId,show_fields:"business,navi,photos"}),rows=(Array.isArray(data.pois)?data.pois as Row[]:[]).filter(row=>clean(row.id).toUpperCase()===directPoiId);
+    const found=rows.length?await searchStoreCandidates(async()=>({status:"1",pois:rows}),nameIsPoi?clean(rows[0].name):baseName||clean(rows[0].name),clean(input.city),clean(input.district),address,1):[];
+    if(found[0]){const expectedProvince=clean(input.province).replace(/省|市$/g,""),actualProvince=clean(found[0].province).replace(/省|市$/g,"");if(expectedProvince&&actualProvince&&expectedProvince!==actualProvince)found[0].conflicts.push(`省份冲突：填写“${clean(input.province)}”，POI 位于“${found[0].province}”`);found[0].score=100;found[0].reasons.unshift("用户提供的高德 POI ID 完全一致");found[0].auto_confirm=!found[0].requires_review&&!found[0].conflicts?.length;found[0].status=found[0].requires_review?"标签待核验":found[0].conflicts?.length?"POI ID 一致，位置或名称需核对":"高置信度"}
+    return found;
   }
   if(Number.isFinite(longitude)&&longitude>=73&&longitude<=136&&Number.isFinite(latitude)&&latitude>=3&&latitude<=54){
     const data=await request("/v3/geocode/regeo",{location:`${longitude},${latitude}`,radius:1000,extensions:"base"}),component=(data.regeocode?.addressComponent||{}) as Row,actualCity=clean(component.city)||clean(component.province),actualDistrict=clean(component.district),expectedCity=clean(input.city).replace(/市$/,"");

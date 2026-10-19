@@ -5,6 +5,8 @@ import { formatBeijingDateTime } from "./time";
 import { useScrollMemory } from "./use-scroll-memory";
 import "./history-activities.css";
 import HistoryMatchingPanel from "./HistoryMatchingPanel";
+import CandidateLookup, {type Candidate,type AmapHistoryCandidate} from "./HistoryCandidateLookup";
+import {callHistory as call,ApiProblem,errorText,historyProblemDetails} from "./history-api";
 
 export type HistoryPermissions = {can_view:boolean;can_export:boolean;can_manage:boolean};
 
@@ -15,8 +17,6 @@ type Store = {
   current_name_decision?:string|null; activity_count:number; latest_activity_start?:string|null;
   sales_amount:number|string|null; unknown_amount_count?:number; address?:string|null; poi_id?:string|null;
 };
-type Candidate = {id:number;brand_name:string;amap_name:string;province:string;city:string;address:string;amap_poi_id:string|null};
-type AmapHistoryCandidate = {id:string;name:string;province:string;city:string;district:string;address:string;type:string;score:number;reasons:string[];conflicts:string[];warnings:string[];library_candidates:Candidate[]};
 type HistoricalCandidate = {id:number;brand_name:string;store_name:string;province:string;city:string;address?:string;poi_id?:string|null};
 type PendingStore = Store&{candidates:Candidate[];is_empty_archive?:boolean;poi_candidates?:AmapHistoryCandidate[];candidate_error?:string};
 type Metrics = {store_count:number;activity_count:number;sales_amount:number|string|null;unknown_amount_count?:number;mixed_refund_basis:boolean};
@@ -48,12 +48,8 @@ const date=(value:string|null|undefined)=>value?value.slice(0,10):"—";
 const excelColumn=(index:number)=>{let result="";for(let value=index;value>0;value=Math.floor((value-1)/26))result=String.fromCharCode(65+(value-1)%26)+result;return result};
 const validSalesValue=(value:string)=>/^(?:0|[1-9]\d*)(?:\.\d{1,2})?$/.test(value.replace(/[,，\s￥¥]/g,""));
 const currentStoreStatus=(store:Store)=>store.archive_only?"仅历史门店":!store.brand_store_id?"待匹配（历史活动可查看）":store.current_deleted_at?"当前已删除":store.current_name_decision==="排除"?"当前已排除":store.current_library_visible===false?"当前未纳入门店库":store.current_status||"当前状态未提供";
-const errorText=(error:unknown)=>error instanceof Error?error.message:"操作失败，请稍后重试";
 
-class ApiProblem extends Error{
-  details:unknown;
-  constructor(message:string,details:unknown){super(message);this.details=details}
-}
+
 
 function withStoreConflicts(preview:Preview,conflicts:StoreConflict[]):Preview{
   if(!conflicts.length)return preview;
@@ -67,40 +63,6 @@ function withStoreConflicts(preview:Preview,conflicts:StoreConflict[]):Preview{
   })};
 }
 
-async function call<T>(api:string,path:string,init?:RequestInit):Promise<T>{
-  const headers=new Headers(init?.headers);
-  if(init?.body&&!(init.body instanceof FormData))headers.set("Content-Type","application/json");
-  const response=await fetch(`${api}${path}`,{...init,headers});
-  let body:{success?:boolean;message?:string;data?:T};
-  try{body=await response.json()}catch{throw new Error("服务返回的数据无法读取")}
-  if(!response.ok||!body.success)throw new ApiProblem(body.message||`请求失败（${response.status}）`,body.data);
-  return body.data as T;
-}
-
-function CandidateLookup({api,brand,province,city,initial,selectedId,onSelect,label,historyStoreId,cachedCandidates,onLinked}:{api:string;brand:string;province:string;city:string;initial:Candidate[];selectedId:number|null;onSelect:(candidate:Candidate|null)=>void;label:string;historyStoreId?:number;cachedCandidates?:AmapHistoryCandidate[];onLinked?:()=>Promise<void>}){
-  const [query,setQuery]=useState(""),[found,setFound]=useState<Candidate[]>([]),[searching,setSearching]=useState(false),[error,setError]=useState("");
-  const [amapFound,setAmapFound]=useState<AmapHistoryCandidate[]|null>(null);
-  const shownAmap=amapFound||cachedCandidates||null;
-  async function confirmPoi(poiId:string){if(!historyStoreId)return;setSearching(true);setError("");try{await call(api,`/history/stores/${historyStoreId}/confirm-poi`,{method:"POST",body:JSON.stringify({poi_id:poiId})});await onLinked?.()}catch(problem){setError(errorText(problem))}finally{setSearching(false)}}
-  const options=[...new Map([...initial,...found].map(item=>[item.id,item])).values()];
-  async function search(scoped:boolean){
-    if(!query.trim()){setError("请输入门店名称、地址或 POI ID");return}
-    const params=new URLSearchParams({q:query.trim()});
-    if(scoped){if(brand)params.set("brand",brand);if(province)params.set("province",province);if(city)params.set("city",city)}
-    setSearching(true);setError("");
-    try{const result=await call<{rows:Candidate[]}>(api,`/history/brand-stores/search?${params}`);setFound(result.rows);if(!result.rows.length)setError("没有找到结果，可修改关键词或搜索全库")}
-    catch(problem){setError(errorText(problem))}
-    finally{setSearching(false)}
-  }
-  async function searchAmap(){
-    if(!historyStoreId)return;
-    setSearching(true);setError("");setAmapFound(null);
-    try{const result=await call<{rows:AmapHistoryCandidate[]}>(api,`/history/stores/${historyStoreId}/amap-candidates`,{method:"POST",body:JSON.stringify({q:query.trim()})});setAmapFound(result.rows);if(!result.rows.length)setError("高德未返回门店 POI 候选，请补充分店地名后重试。")}
-    catch(problem){setError(errorText(problem))}
-    finally{setSearching(false)}
-  }
-  return <div className="history-candidate-lookup"><select aria-label={label} value={selectedId||""} onChange={event=>onSelect(options.find(item=>item.id===Number(event.target.value))||null)}><option value="">暂不关联</option>{options.map(item=><option key={item.id} value={item.id}>{item.brand_name} · {item.amap_name} · {item.province} {item.city} · {item.address||"地址未知"} · {item.amap_poi_id||"无 POI ID"}</option>)}</select><div className="history-candidate-search"><input aria-label={`${label}搜索词`} value={query} onChange={event=>setQuery(event.target.value)} onKeyDown={event=>{if(event.key==="Enter"){event.preventDefault();void search(true)}}} placeholder="搜店名、地址或 POI ID"/><button type="button" disabled={searching} onClick={()=>void search(true)}>本品牌地区找</button><button type="button" disabled={searching} onClick={()=>void search(false)}>全库找</button>{historyStoreId&&<button type="button" disabled={searching} onClick={()=>void searchAmap()}>{searching?"查询中…":"高德实时找"}</button>}</div>{historyStoreId&&<small>高德实时找默认使用原表店名；可在上方补充分店地名。只查询门店信息，不上传销售额。</small>}{error&&<small role="status">{error}</small>}{found.length>0&&<small>新增 {found.length} 条候选，请逐项核对品牌、地区、地址和 POI ID。</small>}{shownAmap&&shownAmap.length>0&&<div className="history-amap-results" role="status">{shownAmap.map(item=><div className="history-amap-result" key={item.id}><b>{item.name}</b><small>{item.province} {item.city} {item.district} · {item.address||"地址未知"}</small><small>POI ID：{item.id} · 匹配分 {item.score} · {item.type||"分类未提供"}</small>{item.conflicts.length>0&&<small>冲突：{item.conflicts.join("；")}</small>}{item.warnings.length>0&&<small>{item.warnings.join("；")}</small>}{item.library_candidates.length?item.library_candidates.map(candidate=><button type="button" key={candidate.id} onClick={()=>{setFound(current=>[...new Map([...current,candidate].map(value=>[value.id,value])).values()]);onSelect(candidate)}}>选择品牌库候选 #{candidate.id}</button>):<div><small>此 POI 暂无同品牌的品牌库记录。核对后可补充入库并关联；系统仍执行名称和业态规则。</small><button type="button" disabled={searching} onClick={()=>void confirmPoi(item.id)}>补充品牌库并确认关联此 POI</button></div>}</div>)}<small>请核对名称、地址和品牌；选择候选后仍需点击“确认关联”。</small></div>}</div>;
-}
 
 export function useHistoryPermissions(active=true,api="/api"){
   const [permissions,setPermissions]=useState<HistoryPermissions|null>(null);
@@ -137,6 +99,8 @@ export default function HistoryActivities({active,isAdmin,api,brands}:{active:bo
   const [pendingPage,setPendingPage]=useState(1);
   const [pendingChoices,setPendingChoices]=useState<Record<number,number>>({}),[pendingSelected,setPendingSelected]=useState<number[]>([]);
   const [pendingManualCandidates,setPendingManualCandidates]=useState<Record<number,Candidate>>({});
+  const [pendingFeedback,setPendingFeedback]=useState<Record<number,{error:boolean;text:string;details:string[]}>>({});
+  const pendingLinkLock=useRef(false),pendingMutationScroll=useRef(false);
   const [importFile,setImportFile]=useState<File|null>(null),[defaultYear,setDefaultYear]=useState(new Date().getFullYear());
   const [preview,setPreview]=useState<Preview|null>(null),[previewPage,setPreviewPage]=useState(1);
   const [conflictActions,setConflictActions]=useState<Record<string,"update"|"skip">>({});
@@ -160,18 +124,18 @@ export default function HistoryActivities({active,isAdmin,api,brands}:{active:bo
   const loadOverview=useCallback(async()=>{
     if(filter.start&&filter.end&&filter.end<filter.start){setNotice("活动结束日期不能早于开始日期");return}
     setLoading(true);
-    try{setStorePage(await call<StorePage>(api,`/history/stores?${params}`));setNotice("")}
-    catch(error){setNotice(errorText(error))}
+    try{setStorePage(await call<StorePage>(api,`/history/stores?${params}`));return true}
+    catch(error){setNotice(errorText(error));return false}
     finally{setLoading(false)}
   },[api,params,filter.start,filter.end]);
   const loadPending=useCallback(async()=>{
     try{
       const result=await call<PendingPage>(api,`/history/pending?page=${pendingPage}&page_size=50`);
       const lastPage=Math.max(1,Math.ceil(result.total/50));
-      if(pendingPage>lastPage){setPendingPage(lastPage);return}
-      setPending(result);setNotice("");
+      if(pendingPage>lastPage){setPendingPage(lastPage);return true}
+      setPending({...result,rows:result.rows.map(row=>({...row,id:Number(row.id),brand_store_id:row.brand_store_id==null?null:Number(row.brand_store_id)}))});return true;
     }
-    catch(error){setNotice(errorText(error))}
+    catch(error){setNotice(errorText(error));return false}
   },[api,pendingPage]);
   const loadFacets=useCallback(async()=>{
     try{setFacets(await call<typeof facets>(api,"/history/facets"))}
@@ -180,7 +144,7 @@ export default function HistoryActivities({active,isAdmin,api,brands}:{active:bo
   const loadDetail=useCallback(async(id:number)=>{
     const seq=++detailRequestSeq.current;
     setSelectedStore(null);setDetailLoading(true);
-    try{const detail=await call<Detail>(api,`/history/stores/${id}/activities${detailParams?`?${detailParams}`:""}`);if(seq===detailRequestSeq.current){setSelectedStore(detail);setRevisionsFor(null);setNotice("")}}
+    try{const detail=await call<Detail>(api,`/history/stores/${id}/activities${detailParams?`?${detailParams}`:""}`);if(seq===detailRequestSeq.current){setSelectedStore(detail);setRevisionsFor(null)}}
     catch(error){if(seq===detailRequestSeq.current)setNotice(errorText(error))}
     finally{if(seq===detailRequestSeq.current)setDetailLoading(false)}
   },[api,detailParams]);
@@ -276,13 +240,40 @@ export default function HistoryActivities({active,isAdmin,api,brands}:{active:bo
       setNotice("仅历史门店档案已创建；不会计入当前品牌门店总数。请在下方补录第一场活动。");
     });
   }
-  async function linkPending(links:Array<{history_store_id:number;brand_store_id:number}>){
-    if(!links.length){setNotice("请先为所选门店指定品牌库候选");return}
-    await run("link",async()=>{
-      await call(api,"/history/stores/bulk-link",{method:"POST",body:JSON.stringify({links})});
-      setPendingSelected([]);setPendingChoices({});setPendingManualCandidates({});await Promise.all([loadPending(),loadOverview()]);
-      setNotice(`已人工关联 ${links.length} 家历史门店。`);
-    });
+  useLayoutEffect(()=>{if(!pendingMutationScroll.current||mode!=="pending")return;pendingMutationScroll.current=false;scrollMemory.restore("history:pending",workspaceRef.current??undefined)},[pending,mode,scrollMemory]);
+  async function finishPendingLinks(ids:number[],message:string){
+    const affected=new Set(ids.map(Number));scrollMemory.capture("history:pending",workspaceRef.current??undefined);pendingMutationScroll.current=true;
+    setPending(current=>({...current,rows:current.rows.filter(row=>!affected.has(Number(row.id))),total:Math.max(0,current.total-affected.size)}));
+    setPendingSelected(current=>current.filter(id=>!affected.has(Number(id))));
+    setPendingChoices(current=>Object.fromEntries(Object.entries(current).filter(([id])=>!affected.has(Number(id)))));
+    setPendingManualCandidates(current=>Object.fromEntries(Object.entries(current).filter(([id])=>!affected.has(Number(id)))));
+    const results=await Promise.all([loadPending(),loadOverview(),loadFacets()]);
+    setNotice(message+(results.some(value=>value===false)?" 关联已保存，但列表刷新失败，请点“刷新候选”查看最新状态。":""));
+  }
+  async function linkPending(links:Array<{history_store_id:number;brand_store_id:number}>):Promise<boolean>{
+    if(!links.length){setNotice("请先为所选门店指定品牌库候选");return false}
+    if(pendingLinkLock.current){setNotice("正在保存另一项门店关联，请等待完成");return false}
+    pendingLinkLock.current=true;setBusy("link");setNotice("");
+    setPendingFeedback(current=>({...current,...Object.fromEntries(links.map(link=>[link.history_store_id,{error:false,text:"正在保存关联…",details:[]}]))}));
+    try{const result=await call<{linked:number;changed:number;already_linked:number;without_poi_id:number}>(api,"/history/stores/bulk-link",{method:"POST",body:JSON.stringify({links})});
+      await finishPendingLinks(links.map(link=>Number(link.history_store_id)),`已确认关联 ${result.linked} 家历史门店。${result.without_poi_id?`其中 ${result.without_poi_id} 家品牌库记录未提供 POI ID，已按门店记录关联。`:"POI ID 已保存。"}`);return true;
+    }catch(error){const feedback={error:true,text:errorText(error),details:historyProblemDetails(error)};setPendingFeedback(current=>({...current,...Object.fromEntries(links.map(link=>[link.history_store_id,feedback]))}));setNotice(feedback.text);return false}
+    finally{pendingLinkLock.current=false;setBusy("")}
+  }
+  async function linkPendingPoi(store:PendingStore,poi:AmapHistoryCandidate):Promise<boolean>{
+    if(pendingLinkLock.current){setNotice("正在保存另一项门店关联，请等待完成");return false}
+    pendingLinkLock.current=true;setBusy("link");setNotice("");setPendingFeedback(current=>({...current,[store.id]:{error:false,text:"正在保存关联…",details:[]}}));
+    try{await call(api,`/history/stores/${store.id}/confirm-poi`,{method:"POST",body:JSON.stringify({poi_id:poi.id})});await finishPendingLinks([Number(store.id)],`已补充并关联：${poi.name}，POI ID 已保存。`);return true}
+    catch(error){const feedback={error:true,text:errorText(error),details:historyProblemDetails(error)};setPendingFeedback(current=>({...current,[store.id]:feedback}));setNotice(feedback.text);return false}
+    finally{pendingLinkLock.current=false;setBusy("")}
+  }
+  function confirmPendingRow(store:PendingStore){
+    const choice=pendingChoices[store.id];if(!choice){setPendingFeedback(current=>({...current,[store.id]:{error:true,text:"尚未选择候选。请在下拉框选择门店，或点击候选卡片中的“确认关联此门店”。",details:[]}}));return}
+    void linkPending([{history_store_id:Number(store.id),brand_store_id:Number(choice)}]);
+  }
+  function confirmPendingBatch(){
+    const missing=pendingSelected.filter(id=>!pendingChoices[id]);if(missing.length){setNotice(`已勾选 ${pendingSelected.length} 家，其中 ${missing.length} 家尚未指定候选。请先指定候选或取消勾选，系统未保存本次关联。`);return}
+    void linkPending(pendingSelected.map(id=>({history_store_id:Number(id),brand_store_id:Number(pendingChoices[id])})));
   }
   async function archivePending(id:number){
     await run("archive-pending",async()=>{
@@ -349,7 +340,7 @@ export default function HistoryActivities({active,isAdmin,api,brands}:{active:bo
 
   return <div className="history-activities" ref={workspaceRef}>
     <section className="panel history-intro"><div><h2>历史活动数据</h2><p>按活动发生时的品牌和地区归类；历史销售额为活动商品的原始上报金额。首版只用于查阅和导出。</p></div><div className="history-subtabs"><button className={mode==="overview"?"on":""} onClick={()=>switchMode("overview")}>活动门店</button>{permissions.can_manage&&<><button className={mode==="pending"?"on":""} onClick={()=>switchMode("pending")}>待匹配门店</button><button className={mode==="import"?"on":""} onClick={()=>switchMode("import")}>导入活动表</button></>}{isAdmin&&<button className={mode==="access"?"on":""} onClick={()=>switchMode("access")}>销售权限</button>}</div></section>
-    {notice&&<div className="job-notice" role="status">{notice}</div>}
+    {notice&&<div className={mode==="pending"?"history-operation-toast":"job-notice"} role="status" aria-live="polite" aria-atomic="true">{notice}{mode==="pending"&&<button type="button" aria-label="关闭操作提示" onClick={()=>setNotice("")}>关闭</button>}</div>}
     {mode==="overview"&&<>
       <section className="panel history-filter-panel">
         <div className="history-filter-grid">
@@ -379,7 +370,7 @@ export default function HistoryActivities({active,isAdmin,api,brands}:{active:bo
         {revokeTarget&&permissions.can_manage&&<div className="history-editor"><h3>撤销 {date(revokeTarget.start_date)} 的活动记录</h3><p>撤销会留痕，不会擦除原始来源。</p><label>撤销原因<input value={revokeReason} onChange={event=>setRevokeReason(event.target.value)} placeholder="必填"/></label><div className="history-actions"><button onClick={()=>setRevokeTarget(null)}>取消</button><button className="danger-btn" disabled={busy!==""} onClick={()=>void revokeActivity()}>确认撤销</button></div></div>}
       </section>}
     </>}
-    {mode==="pending"&&permissions.can_manage&&<section className="panel history-table-panel"><HistoryMatchingPanel api={api} onChanged={async()=>{setPendingSelected([]);setPendingChoices({});await Promise.all([loadPending(),loadOverview(),loadFacets()])}}/><div className="panel-head"><div><h2>待匹配／仅历史档案</h2><p>下拉候选来自现有品牌门店库；未找到时可点“高德实时找”查询门店 POI。原表未提供 POI ID 不代表高德没有该门店。仅凭名称相似不会自动关联；空档案可先补录首场活动。共 {pending.total} 家。</p></div><button onClick={()=>void loadPending()}>刷新候选</button></div><div className="history-actions"><button disabled={busy!==""||!pendingSelected.length} onClick={()=>void linkPending(pendingSelected.filter(id=>pendingChoices[id]).map(id=>({history_store_id:id,brand_store_id:pendingChoices[id]})))}>批量确认关联（{pendingSelected.filter(id=>pendingChoices[id]).length}）</button><button onClick={()=>setPendingSelected([])}>清空选择</button></div><div className="table-wrap history-pending-table" data-scroll-memory="history-pending"><table><thead><tr><th>选择</th><th>历史门店</th><th>地区／活动</th><th>品牌库匹配候选</th><th>操作</th></tr></thead><tbody>{!pending.rows.length?<tr><td colSpan={5}>暂无待匹配记录。</td></tr>:pending.rows.map(store=><tr key={store.id}><td><input type="checkbox" checked={pendingSelected.includes(store.id)} onChange={event=>setPendingSelected(current=>event.target.checked?[...current,store.id]:current.filter(id=>id!==store.id))}/></td><td><b>{store.brand_name||"品牌待确认"}</b><small>{store.store_name}</small><small>{store.poi_id||"原表未提供 POI ID"}</small>{store.candidate_error&&<small role="status">候选查询失败：{store.candidate_error}</small>}{store.is_empty_archive&&<small className="history-empty-archive">仅历史档案 · 尚无活动</small>}</td><td>{store.province} {store.city}<small>{store.activity_count} 场 · {store.sales_amount==null?"销售额未记录":`¥ ${amount(store.sales_amount)}`}</small>{Number(store.unknown_amount_count)>0&&<small>{store.sales_amount!=null&&"已知金额合计；"}{store.unknown_amount_count} 场销售额缺失</small>}</td><td><CandidateLookup api={api} historyStoreId={store.id} cachedCandidates={store.poi_candidates} onLinked={async()=>{await Promise.all([loadPending(),loadOverview()])}} brand={store.brand_name||""} province={store.province||""} city={store.city||""} initial={[...(store.candidates||[]),...(pendingManualCandidates[store.id]?[pendingManualCandidates[store.id]]:[])]} selectedId={pendingChoices[store.id]||null} label={`${store.store_name}匹配候选`} onSelect={candidate=>{setPendingChoices(current=>({...current,[store.id]:candidate?.id||0}));if(candidate)setPendingManualCandidates(current=>({...current,[store.id]:candidate}))}}/><small>请核对品牌、省市、名称和地址；同名门店不可仅凭相似度确认。</small></td><td><button disabled={busy!==""||!pendingChoices[store.id]} onClick={()=>void linkPending([{history_store_id:store.id,brand_store_id:pendingChoices[store.id]}])}>确认关联</button>{store.is_empty_archive?<button onClick={()=>openFirstActivity(store)}>补录首场</button>:<button disabled={busy!==""} onClick={()=>void archivePending(store.id)}>设为仅历史档案</button>}</td></tr>)}</tbody></table></div><div className="library-pagination"><button disabled={pendingPage<=1} onClick={()=>setPendingPage(current=>current-1)}>上一页</button><span>第 {pendingPage}/{Math.max(1,Math.ceil(pending.total/50))} 页</span><button disabled={pendingPage*50>=pending.total} onClick={()=>setPendingPage(current=>current+1)}>下一页</button></div></section>}
+    {mode==="pending"&&permissions.can_manage&&<section className="panel history-table-panel"><HistoryMatchingPanel api={api} onChanged={async(ids)=>{if(ids?.length)await finishPendingLinks(ids,"历史门店关联已保存。");else await Promise.all([loadPending(),loadOverview(),loadFacets()])}}/><div className="panel-head"><div><h2>待匹配／仅历史档案</h2><p>下拉候选来自现有品牌门店库；未找到时可点“高德实时找”查询门店 POI。原表未提供 POI ID 不代表高德没有该门店。仅凭名称相似不会自动关联；空档案可先补录首场活动。共 {pending.total} 家。</p></div><button onClick={()=>void loadPending()}>刷新候选</button></div><div className="history-actions"><button disabled={busy!==""||!pendingSelected.length} onClick={confirmPendingBatch}>批量确认关联（{pendingSelected.filter(id=>pendingChoices[id]).length}/{pendingSelected.length}）</button><button onClick={()=>setPendingSelected([])}>清空选择</button><small>单家关联无需勾选；勾选仅用于批量操作。已勾选 {pendingSelected.length} 家，已指定候选 {pendingSelected.filter(id=>pendingChoices[id]).length} 家。</small></div><div className="table-wrap history-pending-table" data-scroll-memory="history-pending"><table><thead><tr><th>选择</th><th>历史门店</th><th>地区／活动</th><th>品牌库匹配候选</th><th>操作</th></tr></thead><tbody>{!pending.rows.length?<tr><td colSpan={5}>暂无待匹配记录。</td></tr>:pending.rows.map(store=><tr key={store.id}><td><input type="checkbox" checked={pendingSelected.includes(store.id)} onChange={event=>setPendingSelected(current=>event.target.checked?[...current,store.id]:current.filter(id=>id!==store.id))}/></td><td><b>{store.brand_name||"品牌待确认"}</b><small>{store.store_name}</small><small>{store.poi_id||"原表未提供 POI ID"}</small>{store.candidate_error&&<small role="status">候选查询失败：{store.candidate_error}</small>}{store.is_empty_archive&&<small className="history-empty-archive">仅历史档案 · 尚无活动</small>}</td><td>{store.province} {store.city}<small>{store.activity_count} 场 · {store.sales_amount==null?"销售额未记录":`¥ ${amount(store.sales_amount)}`}</small>{Number(store.unknown_amount_count)>0&&<small>{store.sales_amount!=null&&"已知金额合计；"}{store.unknown_amount_count} 场销售额缺失</small>}</td><td><CandidateLookup api={api} historyStoreId={store.id} cachedCandidates={store.poi_candidates} onLinked={async(message)=>{await finishPendingLinks([Number(store.id)],message||"门店关联已保存。")}} onConfirmPoi={async(poi)=>linkPendingPoi(store,poi)} onConfirmCandidate={async(candidate)=>linkPending([{history_store_id:Number(store.id),brand_store_id:Number(candidate.id)}])} brand={store.brand_name||""} province={store.province||""} city={store.city||""} initial={[...(store.candidates||[]),...(pendingManualCandidates[store.id]?[pendingManualCandidates[store.id]]:[])]} selectedId={pendingChoices[store.id]||null} label={`${store.store_name}匹配候选`} onSelect={candidate=>{setPendingChoices(current=>({...current,[store.id]:candidate?.id||0}));setPendingFeedback(current=>({...current,[store.id]:{error:false,text:"",details:[]}}));if(candidate)setPendingManualCandidates(current=>({...current,[store.id]:candidate}))}}/><small>请核对品牌、省市、名称和地址；同名门店不可仅凭相似度确认。</small></td><td className="history-pending-actions"><button disabled={busy!==""} onClick={()=>confirmPendingRow(store)}>{busy==="link"&&pendingFeedback[store.id]?.text==="正在保存关联…"?"正在保存…":"确认关联"}</button>{pendingFeedback[store.id]?.text&&<div className={pendingFeedback[store.id].error?"history-inline-error":"history-inline-status"} role={pendingFeedback[store.id].error?"alert":"status"}>{pendingFeedback[store.id].text}{pendingFeedback[store.id].details.map((detail,index)=><small key={index}>{detail}</small>)}</div>}{store.is_empty_archive?<button onClick={()=>openFirstActivity(store)}>补录首场</button>:<button disabled={busy!==""} onClick={()=>void archivePending(store.id)}>设为仅历史档案</button>}</td></tr>)}</tbody></table></div><div className="library-pagination"><button disabled={pendingPage<=1} onClick={()=>setPendingPage(current=>current-1)}>上一页</button><span>第 {pendingPage}/{Math.max(1,Math.ceil(pending.total/50))} 页</span><button disabled={pendingPage*50>=pending.total} onClick={()=>setPendingPage(current=>current+1)}>下一页</button></div></section>}
     {mode==="import"&&permissions.can_manage&&<section className="panel history-import"><div className="panel-head"><div><h2>导入历史活动 Excel</h2><p>支持每行一家门店、每个日期段一场活动的宽表；多品牌可在品牌列逐行填写。空白格无活动，数字 0 表示已完成但零销售。</p></div></div><datalist id="history-brand-options">{[...new Set([...brands,...facets.brands])].map(brand=><option key={brand} value={brand}/>)}</datalist>
       <div className="history-import-controls"><label>Excel 文件<input type="file" accept=".xlsx" onChange={event=>{setImportFile(event.target.files?.[0]||null);setPreview(null)}}/></label><label>默认年份<input type="number" min="2000" max="2100" value={defaultYear} onChange={event=>setDefaultYear(Number(event.target.value))}/></label><button className="primary" disabled={busy!==""||!importFile} onClick={()=>void uploadPreview()}>{busy==="preview"?"正在预览…":"上传并预览"}</button></div>
       {preview&&<><div className="history-import-summary"><strong>{preview.rows.length} 行门店 · {preview.columns.length} 个活动日期列 · {previewTotals.events} 场 · ¥ {previewTotals.sales}</strong><span>金额按当前未忽略的有效单元格汇总，0 元计为一场；请与原表核对。原文件、工作表和单元格来源会保留。</span></div>{(preview.issues||[]).length>0&&<div className="history-caveat">{(preview.issues||[]).map((issue,index)=><p key={index}>{issue}</p>)}</div>}
