@@ -6,8 +6,10 @@ import { DEFAULT_SNACK_BRANDS } from "./snack-brands.js";
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { callDeepSeek, type AggregateStore } from "../app/api/deepseek.js";
 import { scoreBand, scoreEnvironmentProxies, scorePoiEnvironment } from "../app/scoring.js";
-import { discoverBrandStores as discoverBrandStoreRows, searchStoreCandidates } from "./store-search.js";
-import { classifyResolutionCandidates, type StoreResolutionInput } from "./store-resolution.js";
+import { buildStoreSearchPlan, discoverBrandStores as discoverBrandStoreRows, scoreStoreCandidate, searchStoreCandidates, withStoreSearchDiagnostics, type StoreSearchDiagnostics } from "./store-search.js";
+import { resolveStoreLocationHints } from "./store-location-hints.js";
+import { DASHBOARD_PROVINCES } from "../shared/brand-dashboard.js";
+import { classifyResolutionCandidates, combineStoreAddress, type StoreResolutionInput } from "./store-resolution.js";
 import { query } from "./db.js";
 import { activityCacheKey, forceRuleMetrics, normalizeActivityConfig, scoreParentChildActivity, type ActivityConfig } from "./activity-ai.js";
 
@@ -38,22 +40,61 @@ export async function searchCandidates(input:string,city="",district="",address=
 }
 
 export async function resolveStoreCandidates(input:Partial<StoreResolutionInput>&Row,request:typeof amap=amap){
-  const baseName=clean(input.searchName||input.name||input.originalName),nameIsPoi=/^B[A-Z0-9]{9}$/i.test(baseName),directPoiId=clean(input.poiId||input.poi_id||(nameIsPoi?baseName:"")).toUpperCase(),longitude=Number(input.longitude),latitude=Number(input.latitude),address=clean(input.address);
+  const rawName=clean(input.searchName||input.name||input.originalName),hints=await resolveStoreLocationHints({name:rawName,address:input.address,poiId:input.poiId||input.poi_id,longitude:input.longitude,latitude:input.latitude,locationShare:input.locationShare});
+  const baseName=hints.name,nameIsPoi=/^B[A-Z0-9]{9}$/i.test(baseName),explicitPoiId=clean(input.poiId||input.poi_id||(/^B[A-Z0-9]{9}$/i.test(rawName)?rawName:"")).toUpperCase(),directPoiId=clean(explicitPoiId||hints.poiId||(nameIsPoi?baseName:"")).toUpperCase(),longitude=hints.longitude,latitude=hints.latitude,address=hints.address;
+  const diagnostics:StoreSearchDiagnostics={requests:0,max_requests:10,budget_exhausted:false,failed_stages:[],warnings:[...hints.warnings],location_hints:{name:nameIsPoi?"":baseName,address,longitude,latitude,poi_id:directPoiId||undefined,poi_verified:false}};
+  const finish=(rows:Row[])=>withStoreSearchDiagnostics(rows.map((row):Row=>({...row,warnings:[...new Set([...(row.warnings||[]),...diagnostics.warnings])]})),diagnostics);
+  const safely=async(stage:string,path:string,params:Record<string,unknown>)=>{if(diagnostics.requests>=diagnostics.max_requests){diagnostics.budget_exhausted=true;diagnostics.warnings.push(`检索预算已用完，未执行${stage}`);return null}diagnostics.requests++;try{return await request(path,params)}catch(error){if(error instanceof Error&&error.constructor.name==="QuotaPauseError")throw error;diagnostics.failed_stages.push(stage);diagnostics.warnings.push(`${stage}接口暂时失败，未完成的搜索不能视为没有门店`);return null}};
   if(directPoiId){
-    const data=await request("/v5/place/detail",{id:directPoiId,show_fields:"business,navi,photos"}),rows=(Array.isArray(data.pois)?data.pois as Row[]:[]).filter(row=>clean(row.id).toUpperCase()===directPoiId);
+    let data:Row|null;
+    if(explicitPoiId){diagnostics.requests++;data=await request("/v5/place/detail",{id:directPoiId,show_fields:"business,navi,photos"})}
+    else data=await safely("分享标识详情核验","/v5/place/detail",{id:directPoiId,show_fields:"business,navi,photos"});
+    const rows=(Array.isArray(data?.pois)?data.pois as Row[]:[]).filter(row=>clean(row.id).toUpperCase()===directPoiId);
     const found=rows.length?await searchStoreCandidates(async()=>({status:"1",pois:rows}),nameIsPoi?clean(rows[0].name):baseName||clean(rows[0].name),clean(input.city),clean(input.district),address,1):[];
     if(found[0]){const expectedProvince=clean(input.province).replace(/省|市$/g,""),actualProvince=clean(found[0].province).replace(/省|市$/g,"");if(expectedProvince&&actualProvince&&expectedProvince!==actualProvince)found[0].conflicts.push(`省份冲突：填写“${clean(input.province)}”，POI 位于“${found[0].province}”`);found[0].score=100;found[0].reasons.unshift("用户提供的高德 POI ID 完全一致");found[0].auto_confirm=!found[0].requires_review&&!found[0].conflicts?.length;found[0].status=found[0].requires_review?"标签待核验":found[0].conflicts?.length?"POI ID 一致，位置或名称需核对":"高置信度"}
-    return found;
+    diagnostics.location_hints!.poi_verified=rows.length>0;
+    if(explicitPoiId||rows.length)return finish(found);
+    // A consumer-share identifier is not necessarily resolvable by the open
+    // detail API. Its location may still help recall a real, separate POI.
+    diagnostics.warnings.push("分享标识未得到开放接口确认，仅作位置线索；不会将该标识保存为已核实 POI ID");
   }
-  if(Number.isFinite(longitude)&&longitude>=73&&longitude<=136&&Number.isFinite(latitude)&&latitude>=3&&latitude<=54){
-    const data=await request("/v3/geocode/regeo",{location:`${longitude},${latitude}`,radius:1000,extensions:"base"}),component=(data.regeocode?.addressComponent||{}) as Row,actualCity=clean(component.city)||clean(component.province),actualDistrict=clean(component.district),expectedCity=clean(input.city).replace(/市$/,"");
-    const cityConflict=Boolean(expectedCity&&actualCity&&!actualCity.includes(expectedCity)),score=cityConflict?70:95,conflicts=cityConflict?[`城市冲突：填写“${clean(input.city)}”，坐标位于“${actualCity}”`]:[];
-    return [{id:`COORD-${longitude}-${latitude}`,name:baseName||address||"坐标定位门店",address:clean(data.regeocode?.formatted_address)||address,province:clean(component.province)||clean(input.province),city:actualCity||clean(input.city),district:actualDistrict||clean(input.district),location:[longitude,latitude] as [number,number],type:"用户坐标",typecode:"",score,status:cityConflict?"中置信度，待确认":"高置信度",reasons:["用户提供了有效经纬度","已通过高德逆地理编码核验行政区"],source:"input_coordinates",search_query:"",auto_confirm:!cityConflict,photos:[],conflicts,warnings:cityConflict?["坐标与填写城市不一致，禁止自动确认"]:[]}];
+  let city=clean(input.city),district=clean(input.district);const inferredPlan=buildStoreSearchPlan(baseName.replace(/[（）()]/g,"")),province=clean(input.province)||inferredPlan.province;
+  // Use the same official administrative dictionary as the brand city selector.
+  // A unique dictionary match may supply a city; unrecognised text never invents one.
+  if(!city&&province&&!inferredPlan.city){
+    const officialProvince=DASHBOARD_PROVINCES.find(value=>value===province||value.startsWith(province.replace(/省$/,"")))||province;
+    const dictionary=await safely("省市行政区查询","/v3/config/district",{keywords:officialProvince,subdistrict:2,extensions:"base"});
+    const roots=Array.isArray(dictionary?.districts)?dictionary.districts as Row[]:[],children=Array.isArray(roots[0]?.districts)?roots[0].districts as Row[]:[];
+    const text=`${baseName}${address}`.replace(/\s|[（）()]/g,"");
+    const matched=children.filter(row=>{const name=clean(row.name),short=name.replace(/(?:市|地区|自治州|盟)$/u,"");return short.length>=2&&text.includes(short)});
+    if(matched.length===1){city=clean(matched[0].name);if(!district&&Array.isArray(matched[0].districts)){const found=(matched[0].districts as Row[]).filter(row=>{const short=clean(row.name).replace(/(?:区|县|市|旗)$/u,"");return short.length>=2&&text.includes(short)});if(found.length===1)district=clean(found[0].name)}}
   }
-  const poiCandidates=await searchStoreCandidates(request,baseName,clean(input.city),clean(input.district),address,address?5:6);
-  if(poiCandidates[0]?.auto_confirm||!address)return poiCandidates;
-  const geoCandidates=await geocode({...input,name:baseName,address},request),normalized=geoCandidates.map((candidate:any)=>({...candidate,id:String(candidate.id).toUpperCase(),score:Math.min(59,Number(candidate.score||58)),status:"地址定位结果，待确认",auto_confirm:false,photos:[],conflicts:[],warnings:["仅验证了地址位置，尚未验证门店身份"]}));
-  return classifyResolutionCandidates([...poiCandidates,...normalized].sort((a,b)=>Number(b.score)-Number(a.score))).candidates;
+  city ||= inferredPlan.city;district ||= inferredPlan.district;
+  const plan=buildStoreSearchPlan(baseName||clean(input.originalName),city,district,address);plan.brand ||= clean(input.brand)||buildStoreSearchPlan(clean(input.originalName)).brand;
+  async function nearby(origin:[number,number],source:string){
+    const keyword=plan.brand||baseName;if(!keyword){diagnostics.warnings.push("位置已保留，但缺少品牌或店名，未将附近任意商户视为目标门店");return []}
+    const found=new Map<string,Row>();
+    for(const radius of [1500,3000]){const data=await safely("地址附近门店搜索","/v5/place/around",{location:origin.join(","),radius,keywords:keyword,sortrule:"distance",show_fields:"business,navi,photos",page_size:25,page_num:1});
+      for(const raw of (Array.isArray(data?.pois)?data.pois as Row[]:[])){if(!/^B[A-Z0-9]{9}$/i.test(clean(raw.id)))continue;const candidate=scoreStoreCandidate(raw,plan,source,keyword);if(candidate)found.set(candidate.id,{...candidate,auto_confirm:false,requires_review:true,status:"位置附近候选，待确认",warnings:[...candidate.warnings,"由地址或坐标附近召回；位置相近不代表同一家门店，请核对名称、地址和品牌"]})}
+      if(found.size||!data)break;
+    }return [...found.values()].sort((a,b)=>Number(b.score)-Number(a.score));
+  }
+  if(longitude!=null&&latitude!=null){
+    const data=await safely("坐标行政区核验","/v3/geocode/regeo",{location:`${longitude},${latitude}`,radius:1000,extensions:"base"}),component=(data?.regeocode?.addressComponent||{}) as Row,actualCity=clean(component.city)||clean(component.province),actualDistrict=clean(component.district),expectedCity=city.replace(/市$/,"");
+    const cityConflict=Boolean(expectedCity&&actualCity&&!actualCity.includes(expectedCity)),conflicts=cityConflict?[`城市冲突：填写“${city}”，坐标位于“${actualCity}”`]:[];
+    const fallback={id:`COORD-${longitude}-${latitude}`,name:baseName||address||"坐标定位门店",address:clean(data?.regeocode?.formatted_address)||address,province:clean(component.province)||province,city:actualCity||city,district:actualDistrict||district,location:[longitude,latitude] as [number,number],type:"用户坐标",typecode:"",score:58,status:"位置线索，待确认",reasons:["用户提供了有效高德经纬度",...(data?["已通过高德逆地理编码核验行政区"]:[])],source:"input_coordinates",search_query:"",auto_confirm:false,photos:[],conflicts,warnings:["坐标仅代表位置，不是高德门店 POI ID，也不能证明门店身份"]};
+    return finish([...(await nearby([longitude,latitude],"coordinate_nearby")),fallback]);
+  }
+  const poiCandidates=await searchStoreCandidates(request,baseName,city,district,address,address?5:6);
+  diagnostics.requests+=poiCandidates.diagnostics.requests;diagnostics.budget_exhausted ||= poiCandidates.diagnostics.budget_exhausted;diagnostics.failed_stages.push(...poiCandidates.diagnostics.failed_stages);diagnostics.warnings.push(...poiCandidates.diagnostics.warnings);
+  if(poiCandidates[0]?.auto_confirm||!address)return finish(poiCandidates);
+  const geoData=await safely("地址定位","/v3/geocode/geo",{address:combineStoreAddress([province,city,district,address]),city}),geoRows=Array.isArray(geoData?.geocodes)?geoData.geocodes as Row[]:[];
+  const normalized=geoRows.map((raw,index)=>{const location=parseLocation(raw.location);return location?{id:`GEO-${index}`,name:baseName||clean(raw.formatted_address),address:clean(raw.formatted_address)||address,province:clean(raw.province)||province,city:clean(raw.city)||city,district:clean(raw.district)||district,location,type:"地址定位",typecode:"",score:58,status:"地址定位结果，待确认",auto_confirm:false,reasons:["根据详细地址完成地理编码"],source:"amap_geocode",photos:[],conflicts:[],warnings:["仅验证了地址位置，尚未验证门店身份"]}:null}).filter((row):row is NonNullable<typeof row>=>row!=null);
+  // Keep the address point as a separate fallback; it is never a persistent POI.
+  const recovered=normalized[0]?await nearby(normalized[0].location,"address_nearby"):[],unique=new Map<string,Row>();
+  for(const candidate of [...poiCandidates,...recovered]){const previous=unique.get(candidate.id);if(!previous||Number(candidate.score)>Number(previous.score))unique.set(candidate.id,candidate)}
+  const ranked=[...unique.values()].sort((a,b)=>Number(b.score)-Number(a.score));
+  return finish(classifyResolutionCandidates([...ranked,...normalized] as any[]).candidates);
 }
 
 export async function discoverBrandStores(brand:string,city:string,district="",request:typeof amap=amap,aliases:string[]=[],overrides:Record<string,AilingshiOverride>={}){

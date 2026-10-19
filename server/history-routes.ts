@@ -6,6 +6,7 @@ import {pool,query} from "./db.js";
 import {resolveStoreCandidates} from "./services.js";
 import {exactHistoryPreview,validateExactHistoryLinks,cacheHistoryCandidates} from "./history-matching.js";
 import {HistoryLinkError,applyHistoryLinks,historyLinkCollisions,linkHistoryStores} from "./history-linking.js";
+import {saveHistoryLocation,searchAnalysisHistoryCandidates,linkHistoryAnalysisStore,createHistoryAnalysisStore} from "./history-location.js";
 import {consumeBackgroundQuota} from "./amap-usage.js";
 import {amapRequest} from "./services.js";
 import {saveDiscoveredStores} from "./brand-library.js";
@@ -70,19 +71,28 @@ export function historyAmapLibraryCandidates(source:{brand_name:unknown;province
 }
 router.post("/stores/:id/amap-candidates",requireAdmin,wrap(async(req,res)=>{
   const id=positiveId(req.params.id),tenantId=req.user!.tenantId;
-  const source=(await query<{brand_name:string;store_name:string;province:string;city:string;address:string;poi_id:string|null}>("SELECT brand_name,store_name,province,city,address,poi_id FROM history_stores WHERE tenant_id=$1 AND id=$2",[tenantId,id])).rows[0];
+  const source=(await query<DataRow>("SELECT * FROM history_stores WHERE tenant_id=$1 AND id=$2",[tenantId,id])).rows[0];
   if(!source)return bad(res,"历史门店不存在",404);
   const name=str(req.body?.q)||str(source.store_name);if(!name||name.length>100)return bad(res,"门店搜索名称须为 1 至 100 个字符");
+  const searchAddress=str(req.body?.address)||str(source.verified_address)||str(source.address),locationShare=str(req.body?.location_share);
+  if(searchAddress.length>500||locationShare.length>2000)return bad(res,"地址或高德分享线索过长");
   const requestedPoi=/^B[A-Z0-9]{9}$/i.test(name)?name.toUpperCase():"";
-  const foundRaw=await resolveStoreCandidates({originalName:source.store_name,searchName:name,province:source.province,city:source.city,address:source.address,poiId:requestedPoi||(str(req.body?.q)?"":str(source.poi_id))},async(path,params)=>{await consumeBackgroundQuota(tenantId,{userId:req.user!.id,sourceType:"history_matching",sourceId:id,operation:"manual_candidate_search",details:{path,page:params.page_num||params.page}});return amapRequest(path,params)});
+  const foundRaw=await resolveStoreCandidates({originalName:str(source.store_name),searchName:name,province:str(source.province),city:str(source.city),address:searchAddress,locationShare,longitude:req.body?.longitude??source.verified_longitude,latitude:req.body?.latitude??source.verified_latitude,poiId:requestedPoi||(str(req.body?.q)?"":str(source.poi_id))},async(path,params)=>{await consumeBackgroundQuota(tenantId,{userId:req.user!.id,sourceType:"history_matching",sourceId:id,operation:"manual_candidate_search",details:{path,page:params.page_num||params.page}});return amapRequest(path,params)});
   const found=requestedPoi?foundRaw.filter(row=>String(row.id).toUpperCase()===requestedPoi):foundRaw;
   if(requestedPoi&&!found.length)return bad(res,"高德未返回该 POI ID 的门店，请核对 ID 后重试",404,null,"HISTORY_POI_NOT_FOUND");
   await cacheHistoryCandidates(tenantId,{...source,id},found.filter(item=>/^B[A-Z0-9]{9}$/i.test(String(item.id))) as unknown as DataRow[]);
   const pois=[...new Map(found.filter(item=>item.id&&!/^(COORD-|GEOCODE-)/i.test(String(item.id))&&item.source!=="amap_geocode").map(item=>[String(item.id),item])).values()].slice(0,10);
   const ids=pois.map(item=>String(item.id));
   const library=ids.length?(await query<Candidate>("SELECT id,brand_name,amap_name,province,city,address,amap_poi_id FROM brand_stores WHERE tenant_id=$1 AND amap_poi_id=ANY($2::text[])",[tenantId,ids])).rows.map(item=>({...item,id:Number(item.id)})):[];
-  return respond(res,{rows:pois.map(item=>({id:item.id,name:item.name,province:item.province,city:item.city,district:item.district,address:item.address,type:item.type,score:item.score,reasons:item.reasons||[],conflicts:item.conflicts||[],warnings:item.warnings||[],library_candidates:historyAmapLibraryCandidates(source,item,library)}))},"高德候选已返回，请核对后人工确认；查询不会修改历史活动关联");
+  return respond(res,{rows:pois.map(item=>({id:item.id,name:item.name,province:item.province,city:item.city,district:item.district,address:item.address,type:item.type,score:item.score,reasons:item.reasons||[],conflicts:item.conflicts||[],warnings:item.warnings||[],library_candidates:historyAmapLibraryCandidates(source as never,item,library)})),diagnostics:(foundRaw as unknown as {diagnostics?:unknown}).diagnostics||null},"高德候选已返回，请核对后人工确认；查询不会修改历史活动关联");
 }));
+router.patch("/stores/:id/location",requireAdmin,wrap(async(req,res)=>respond(res,await saveHistoryLocation(req.user!.tenantId,req.user!.id,positiveId(req.params.id),req.body||{},req.ip||"",async(longitude,latitude)=>{
+ await consumeBackgroundQuota(req.user!.tenantId,{userId:req.user!.id,sourceType:"history_matching",sourceId:positiveId(req.params.id),operation:"manual_location_region_check",details:{path:"/v3/geocode/regeo"}});
+ const result=await amapRequest("/v3/geocode/regeo",{location:`${longitude},${latitude}`,extensions:"base"}),component=result.regeocode?.addressComponent||{},province=str(component.province),city=str(component.city)||(/^(北京市|上海市|天津市|重庆市)$/.test(province)?province:"");return {province,city};
+}),"已保存人工核实位置；坐标省市已核对，该位置不代表已取得真实 POI")));
+router.get("/analysis-stores/search",requireAdmin,wrap(async(req,res)=>respond(res,await searchAnalysisHistoryCandidates(req.user!.tenantId,positiveId(req.query.history_store_id),str(req.query.q)))));
+router.post("/stores/:id/link-analysis",requireAdmin,wrap(async(req,res)=>respond(res,await linkHistoryAnalysisStore(req.user!.tenantId,req.user!.id,positiveId(req.params.id),positiveId(req.body?.analysis_store_id),str(req.body?.reason),req.ip||""),"分析记录已人工关联历史档案，活动销售数据保持原样")));
+router.post("/stores/:id/create-analysis",requireAdmin,wrap(async(req,res)=>respond(res,await createHistoryAnalysisStore(req.user!.tenantId,req.user!.id,positiveId(req.params.id),str(req.body?.reason),req.ip||"",str(req.body?.expected_updated_at)),"已使用人工核实位置建立分析记录；没有创建高德 POI 或正常品牌门店")));
 router.get("/brand-stores/search",requireAdmin,wrap(async(req,res)=>{
   const tenantId=req.user!.tenantId,q=str(req.query.q),brand=str(req.query.brand),province=str(req.query.province),city=str(req.query.city);
   if(!q&&!brand&&!province&&!city)return bad(res,"请输入门店名称、地址或 POI ID，或选择品牌和地区");
@@ -149,7 +159,7 @@ router.get("/pending",requireHistory("view"),wrap(async(req,res)=>{
     AND ((archive_only=TRUE AND NOT EXISTS(SELECT 1 FROM history_activities a WHERE a.history_store_id=hs.id AND a.tenant_id=hs.tenant_id AND a.revoked_at IS NULL))
       OR (archive_only=FALSE AND EXISTS(SELECT 1 FROM history_activities a WHERE a.history_store_id=hs.id AND a.tenant_id=hs.tenant_id AND a.revoked_at IS NULL)))`,[tenantId])).rows[0]?.n||0);
   const sourceRows:HistorySourceRow[]=rows.map(r=>({row_number:Number(r.id),name:String(r.store_name),brand:String(r.brand_name),province:String(r.province),city:String(r.city),region_source:"column",address:String(r.address),poi_id:String(r.poi_id||""),values:{},issues:[]})),candidateMap=await candidates(tenantId,sourceRows);
-  const saved=(await query<DataRow>("SELECT c.* FROM history_poi_candidates c JOIN history_stores h ON h.id=c.history_store_id AND h.tenant_id=c.tenant_id WHERE c.tenant_id=$1 AND c.history_store_id=ANY($2::bigint[]) AND c.source_name=h.store_name AND c.source_brand=h.brand_name AND c.source_province=h.province AND c.source_city=h.city",[tenantId,rows.map(r=>Number(r.id))])).rows;
+  const saved=(await query<DataRow>("SELECT c.* FROM history_poi_candidates c JOIN history_stores h ON h.id=c.history_store_id AND h.tenant_id=c.tenant_id WHERE c.tenant_id=$1 AND c.history_store_id=ANY($2::bigint[]) AND c.source_name=h.store_name AND c.source_brand=h.brand_name AND c.source_province=h.province AND c.source_city=h.city AND c.source_location_version=h.location_version",[tenantId,rows.map(r=>Number(r.id))])).rows;
   const poiIds=[...new Set(saved.flatMap(r=>(Array.isArray(r.candidates_json)?r.candidates_json:[]).map((c:DataRow)=>String(c.id))))];
   const library=poiIds.length?(await query<Candidate>("SELECT id,brand_name,amap_name,province,city,address,amap_poi_id FROM brand_stores WHERE tenant_id=$1 AND amap_poi_id=ANY($2::text[])",[tenantId,poiIds])).rows.map(row=>({...row,id:Number(row.id)})):[];
   return respond(res,{rows:rows.map(r=>{const cache=saved.find(c=>Number(c.history_store_id)===Number(r.id));return {...r,id:Number(r.id),brand_store_id:r.brand_store_id==null?null:Number(r.brand_store_id),candidates:candidateMap.get(Number(r.id))||[],poi_candidates:((cache?.candidates_json||[]) as DataRow[]).map(c=>({...c,library_candidates:historyAmapLibraryCandidates(r as never,c,library)})),candidate_error:cache?.error_message||null,candidates_checked_at:cache?.checked_at||null}}),total,page:p,page_size:size});
@@ -288,7 +298,7 @@ router.post("/stores/:id/confirm-poi",requireAdmin,wrap(async(req,res)=>{
  const id=positiveId(req.params.id),poiId=str(req.body?.poi_id).toUpperCase(),tenantId=req.user!.tenantId;if(!id||!/^B[A-Z0-9]{9}$/i.test(poiId))return bad(res,"请选择已查询到的真实高德 POI");
  const client=await pool.connect();try{await client.query("BEGIN");await client.query("SELECT pg_advisory_xact_lock($1,97134)",[tenantId]);
   const source=(await client.query("SELECT * FROM history_stores WHERE tenant_id=$1 AND id=$2 FOR UPDATE",[tenantId,id])).rows[0];if(!source)throw new Error("历史门店不存在");if(isRetiredSnackBrand(source.brand_name))throw new Error("该系统已移除，不能重新补充入库");
-  const cached=(await client.query("SELECT * FROM history_poi_candidates WHERE tenant_id=$1 AND history_store_id=$2 AND source_name=$3 AND source_brand=$4 AND source_province=$5 AND source_city=$6",[tenantId,id,source.store_name,source.brand_name,source.province,source.city])).rows[0];
+  const cached=(await client.query("SELECT * FROM history_poi_candidates WHERE tenant_id=$1 AND history_store_id=$2 AND source_name=$3 AND source_brand=$4 AND source_province=$5 AND source_city=$6 AND source_location_version=$7",[tenantId,id,source.store_name,source.brand_name,source.province,source.city,source.location_version])).rows[0];
   const poi=(cached?.candidates_json as DataRow[]|undefined)?.find(item=>item.id===poiId);if(!poi)throw new HistoryLinkError("候选已失效，请重新查询并核对名称和地址",409,"HISTORY_CANDIDATE_STALE");
   if((source.province&&poi.province!==source.province)||(source.city&&poi.city!==source.city))throw new HistoryLinkError("候选省市与历史门店不一致，请人工核对，不能直接补充关联",409,"HISTORY_IDENTITY_MISMATCH");
   let library=(await client.query("SELECT * FROM brand_stores WHERE tenant_id=$1 AND amap_poi_id=$2 AND brand_name=$3",[tenantId,poiId,source.brand_name])).rows;
@@ -308,10 +318,16 @@ function activityInput(body:DataRow,store:DataRow){
   return {start_date,end_date,sales_amount:sale,activity_name:str(body.activity_name)||`${start_date} 至 ${end_date}`,refund_basis:refund(body.refund_basis),brand_name,store_name,province,city,address,calendar_tags:calendarTags(start_date,end_date)};
 }
 async function activityGroupCollision(client:PoolClient,tenantId:number,storeId:number,start:string,end:string,excludingId:number|null=null){
-  return (await client.query<DataRow>(`SELECT a.id,a.history_store_id FROM history_stores subject
-    JOIN history_stores peer ON peer.tenant_id=subject.tenant_id AND (peer.id=subject.id OR (subject.brand_store_id IS NOT NULL AND peer.brand_store_id=subject.brand_store_id))
-    JOIN history_activities a ON a.history_store_id=peer.id AND a.tenant_id=subject.tenant_id AND a.revoked_at IS NULL
-    WHERE subject.tenant_id=$1 AND subject.id=$2 AND a.start_date=$3::date AND a.end_date=$4::date AND ($5::bigint IS NULL OR a.id<>$5) LIMIT 1`,[tenantId,storeId,start,end,excludingId])).rows[0]||null;
+  return (await client.query<DataRow>(`WITH identities AS (
+    SELECT id,'history:'||id::text identity FROM history_stores WHERE tenant_id=$1
+    UNION SELECT id,'brand:'||brand_store_id::text FROM history_stores WHERE tenant_id=$1 AND brand_store_id IS NOT NULL
+    UNION SELECT id,'poi:'||upper(btrim(poi_id)) FROM history_stores WHERE tenant_id=$1 AND poi_id ~* '^B[A-Z0-9]{9}$'
+    UNION SELECT h.id,'poi:'||upper(btrim(b.amap_poi_id)) FROM history_stores h JOIN brand_stores b ON b.id=h.brand_store_id AND b.tenant_id=h.tenant_id WHERE h.tenant_id=$1 AND b.amap_poi_id ~* '^B[A-Z0-9]{9}$'
+    UNION SELECT history_store_id,'poi:'||upper(btrim(amap_poi_id)) FROM stores WHERE tenant_id=$1 AND history_store_id IS NOT NULL AND amap_poi_id ~* '^B[A-Z0-9]{9}$'
+    UNION SELECT history_store_id,'brand:'||brand_store_id::text FROM stores WHERE tenant_id=$1 AND history_store_id IS NOT NULL AND brand_store_id IS NOT NULL
+   ) SELECT a.id,a.history_store_id FROM identities subject JOIN identities peer ON peer.identity=subject.identity
+    JOIN history_activities a ON a.history_store_id=peer.id AND a.tenant_id=$1 AND a.revoked_at IS NULL
+    WHERE subject.id=$2 AND a.start_date=$3::date AND a.end_date=$4::date AND ($5::bigint IS NULL OR a.id<>$5) LIMIT 1`,[tenantId,storeId,start,end,excludingId])).rows[0]||null;
 }
 router.post("/activities",requireAdmin,wrap(async(req,res)=>{
   const storeId=positiveId(req.body?.history_store_id),store=(await query<DataRow>("SELECT * FROM history_stores WHERE tenant_id=$1 AND id=$2",[req.user!.tenantId,storeId])).rows[0];if(!store)return bad(res,"历史门店不存在",404);const input=activityInput(req.body,store),client=await pool.connect();try{await client.query("BEGIN");await client.query("SELECT pg_advisory_xact_lock($1,$2)",[req.user!.tenantId,97134]);const collision=await activityGroupCollision(client,req.user!.tenantId,storeId,input.start_date,input.end_date);if(collision)throw new CommitConflict({store_conflicts:[{history_store_id:storeId,activity_id:collision.id,reason:"这家门店在该日期段已有有效活动"}]});const row=(await client.query<DataRow>("INSERT INTO history_activities(tenant_id,history_store_id,start_date,end_date,activity_name,sales_amount,refund_basis,brand_name,store_name,province,city,address,calendar_tags,created_by,updated_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14) RETURNING *",[req.user!.tenantId,storeId,input.start_date,input.end_date,input.activity_name,input.sales_amount,input.refund_basis,input.brand_name,input.store_name,input.province,input.city,input.address,JSON.stringify(input.calendar_tags),req.user!.id])).rows[0];await client.query("INSERT INTO history_activity_revisions(tenant_id,activity_id,action,after_json,reason,changed_by) VALUES($1,$2,'create',$3,$4,$5)",[req.user!.tenantId,row.id,JSON.stringify(row),str(req.body?.reason)||"人工补录",req.user!.id]);await client.query("COMMIT");return respond(res,row,"活动已补录",201)}catch(e){await client.query("ROLLBACK");if(e instanceof CommitConflict)return bad(res,e.message,409,e.details);if((e as {code?:string}).code==="23505")return bad(res,"这家门店在该日期段已有活动，请修正原记录",409);throw e}finally{client.release()}

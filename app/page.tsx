@@ -12,6 +12,7 @@ import StoreContact from "./StoreContact";
 import BrandDashboard from "./BrandDashboard";
 import BrandRefreshControls from "./BrandRefreshControls";
 import HistoryActivities, { useHistoryPermissions } from "./HistoryActivities";
+import type {HistoryAnalysisStart} from "./HistoryStoreLocator";
 import PoiTable, { PoiDetails, PoiFilterBar } from "./PoiExplorer";
 import { emptyPoiFilters, filterPois, poiCategoryOptions, poiKey, type ExplorerPoi } from "./poi-explorer";
 import RemovedBrandStores, { BrandStoreRemovalDialog } from "./BrandStoreAdmin";
@@ -196,7 +197,9 @@ export default function Page() {
     brandScrollMemory.forget("brand:library-refresh");
   },[auth.user,brandScrollMemory,pageScrollMemory]);
   const [mode, setMode] = useState({ mock: true, web_key: false, js_key: false });
-  const [query, setQuery] = useState({ name: "", province:"", city: "", district: "", address: "", adcode:"" });
+  const [query, setQuery] = useState({ name: "", province:"", city: "", district: "", address: "", adcode:"", locationShare:"", longitude:"", latitude:"" });
+  const singleSearch=useRef<{sequence:number;controller?:AbortController}>({sequence:0});
+  const [searchWarnings,setSearchWarnings]=useState<string[]>([]);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [selected, setSelected] = useState<Candidate | null>(null);
   const [categories, setCategories] = useState<string[]>(defaultCategories);
@@ -254,36 +257,52 @@ export default function Page() {
     });
   },[importPreview,storeFilter]);
 
+  function changeSingleQuery(patch:Partial<typeof query>){singleSearch.current.controller?.abort();singleSearch.current.sequence++;setQuery(current=>({...current,...patch}));setCandidates([]);setSelected(null);setPois([]);setSearchWarnings([]);if(busy==="search")setBusy("")}
+  useEffect(()=>()=>singleSearch.current.controller?.abort(),[]);
   async function search() {
-    setBusy("search"); setError(""); setPois([]); setSelected(null);
+    singleSearch.current.controller?.abort();const controller=new AbortController(),sequence=singleSearch.current.sequence+1;singleSearch.current={sequence,controller};
+    setBusy("search"); setError(""); setSearchWarnings([]);setCandidates([]);setPois([]); setSelected(null);
     try {
-      const data = await request<{ candidates: Candidate[] }>("/stores/search", { method: "POST", body: JSON.stringify(query) });
+      const data = await request<{ candidates: Candidate[];diagnostics?:{warnings?:string[];budget_exhausted?:boolean} }>("/stores/search", { method: "POST", body: JSON.stringify(query),signal:controller.signal });
+      if(singleSearch.current.sequence!==sequence)return;
       setCandidates(data.candidates);
-      if(!data.candidates.length)setError("未找到候选位置；系统已尝试门店名称、详细地址、关键词变体、地址定位和地标周边回退搜索");
-    } catch (e) { setError(e instanceof Error ? e.message : "搜索失败"); } finally { setBusy(""); }
+      setSearchWarnings(data.diagnostics?.warnings||[]);
+      if(!data.candidates.length)setError(data.diagnostics?.budget_exhausted?"本次搜索已达到请求上限，部分回退步骤未执行。请补充地址、分享位置或缩小城市后重试。":"没有查到真实门店候选。可补充地址、高德分享链接或坐标，再按附近品牌搜索；无 POI 的活动门店也可在历史模块人工核实位置并关联。");
+    } catch (e) { if(!controller.signal.aborted&&singleSearch.current.sequence===sequence)setError(e instanceof Error ? e.message : "搜索失败"); } finally { if(singleSearch.current.sequence===sequence)setBusy(""); }
   }
 
   async function confirm(c: Candidate) {
+    const sequence=singleSearch.current.sequence;
     setBusy("confirm"); setError("");
     try {
       const store = c.id.startsWith("GEO-")||c.source==="amap_geocode"
         ? await request<{id:number}>("/stores/from-geocode",{method:"POST",body:JSON.stringify({...query,candidate:c})})
         : await request<{ id: number }>("/stores", { method: "POST", body: JSON.stringify({ ...query, candidate: c }) });
       await request(`/stores/${store.id}/confirm`, { method: "POST", body: JSON.stringify({ candidate: c, confirmation_method: "用户手动选择候选" }) });
+      if(singleSearch.current.sequence!==sequence)return;
       setSelected({ ...c, storeId: store.id } as Candidate & { storeId: number });
-    } catch (e) { setError(e instanceof Error ? e.message : "确认失败"); } finally { setBusy(""); }
+    } catch (e) { if(singleSearch.current.sequence===sequence)setError(e instanceof Error ? e.message : "确认失败"); } finally { if(singleSearch.current.sequence===sequence)setBusy(""); }
+  }
+
+  function startHistoryAnalysis(data:HistoryAnalysisStart){
+    singleSearch.current.controller?.abort();singleSearch.current.sequence++;
+    const c=data.candidate,candidate:Candidate={...c,type:"人工核实位置",typecode:"",status:"人工核实，无高德 POI ID",reasons:c.reasons||["管理员已核实历史门店位置"],score:Number.isFinite(c.score)?c.score:0,photos:[]};
+    setQuery(current=>({...current,name:c.name,province:c.province||"",city:c.city||"",district:c.district||"",address:c.address||"",locationShare:"",longitude:String(c.location[0]),latitude:String(c.location[1])}));
+    setCandidates([candidate]);setSelected({...candidate,storeId:data.analysis_store_id} as Candidate&{storeId:number});setPois([]);setJobId(null);setBusiness(null);setAiVersions([]);setActiveAiId(null);setError("");setBusy("");setSearchWarnings(["已使用人工核实的历史门店位置，历史档案关联已保留。可继续配置周边搜索；导出时勾选历史销售数据。"]);pageScrollMemory.forget("page:single");switchTab("single");
   }
 
   async function analyze() {
     if (!selected) return;
+    const sequence=singleSearch.current.sequence;
     setBusy("poi"); setError("");
     try {
       const storeId = (selected as Candidate & { storeId: number }).storeId;
       const data = await request<{ job_id: number; pois: Poi[] }>(`/stores/${storeId}/poi-search`, {
         method: "POST", body: JSON.stringify({ categories, radii, max_radius: Math.max(...radii) })
       });
+      if(singleSearch.current.sequence!==sequence)return;
       setPois(data.pois); setJobId(data.job_id); setBusiness(null);setAiVersions([]);setActiveAiId(null); setResultTab("distribution");
-    } catch (e) { setError(e instanceof Error ? e.message : "分析失败"); } finally { setBusy(""); }
+    } catch (e) { if(singleSearch.current.sequence===sequence)setError(e instanceof Error ? e.message : "分析失败"); } finally { if(singleSearch.current.sequence===sequence)setBusy(""); }
   }
 
   function addRadius() {
@@ -400,24 +419,27 @@ export default function Page() {
         {tab==="single" && <>
           <section className="panel search-panel">
             <div className="section-title"><span>01</span><div><h2>查找并确认门店</h2><p>系统始终返回候选列表，不会无条件选择第一条结果</p></div></div>
-            <div className="smart-search-note"><b>智能搜索</b><span>门店名称或详细地址填写任意一项即可；省、市、区县用于提高准确度。</span></div>
+            <div className="smart-search-note"><b>智能搜索</b><span>门店名称或详细地址填写任意一项即可；也可补充高德分享位置。名称未命中时，会继续尝试附近品牌门店，请核对候选后确认。</span></div>
             <div className="form-grid store-search-form">
-              <label>门店名称 <small>与详细地址二选一</small><input value={query.name} onChange={e=>setQuery({...query,name:e.target.value})} placeholder="例如：零食很忙武汉南湖店"/></label>
-              <label>详细地址 <small>与门店名称二选一</small><input value={query.address} onChange={e=>setQuery({...query,address:e.target.value})} placeholder="例如：人民广场胜利小学西北，或具体道路门牌"/></label>
+              <label>门店名称 <small>可填品牌和分店名称</small><input disabled={!!busy&&busy!=="search"} value={query.name} maxLength={100} onChange={e=>changeSingleQuery({name:e.target.value})} placeholder="例如：零食很忙武汉南湖店"/></label>
+              <label>详细地址 <small>可单独填写，也可补充名称</small><input disabled={!!busy&&busy!=="search"} value={query.address} maxLength={500} onChange={e=>changeSingleQuery({address:e.target.value})} placeholder="例如：人民广场胜利小学西北，或具体道路门牌"/></label>
+              <details className="single-search-extra"><summary>补充高德分享链接或坐标</summary><label>高德分享链接<input disabled={!!busy&&busy!=="search"} value={query.locationShare} maxLength={2048} onChange={e=>changeSingleQuery({locationShare:e.target.value})} placeholder="粘贴高德 APP 分享的门店链接"/></label><div className="single-coordinate-fields"><label>经度（GCJ-02）<input disabled={!!busy&&busy!=="search"} inputMode="decimal" value={query.longitude} onChange={e=>changeSingleQuery({longitude:e.target.value})} placeholder="例如：114.300000"/></label><label>纬度（GCJ-02）<input disabled={!!busy&&busy!=="search"} inputMode="decimal" value={query.latitude} onChange={e=>changeSingleQuery({latitude:e.target.value})} placeholder="例如：30.600000"/></label></div><small>分享链接不一定包含 POI ID；地址点和手填坐标用于找店及人工核实，不等于高德已确认的门店身份。</small></details>
               <div className="store-search-regions">
-                <label>省份<input value={query.province} onChange={e=>setQuery({...query,province:e.target.value})} placeholder="湖北省"/></label>
-                <label>城市<input value={query.city} onChange={e=>setQuery({...query,city:e.target.value})} placeholder="武汉市"/></label>
-                <label>区县<input value={query.district} onChange={e=>setQuery({...query,district:e.target.value})} placeholder="洪山区"/></label>
-                <button className="primary" disabled={(!query.name.trim()&&!query.address.trim())||!!busy} onClick={search}>{busy==="search"?"正在智能查找…":"查找门店"}</button>
+                <label>省份<input disabled={!!busy&&busy!=="search"} value={query.province} onChange={e=>changeSingleQuery({province:e.target.value})} placeholder="湖北省"/></label>
+                <label>城市<input disabled={!!busy&&busy!=="search"} value={query.city} onChange={e=>changeSingleQuery({city:e.target.value})} placeholder="武汉市"/></label>
+                <label>区县<input disabled={!!busy&&busy!=="search"} value={query.district} onChange={e=>changeSingleQuery({district:e.target.value})} placeholder="洪山区"/></label>
+                <button className="primary" disabled={(!query.name.trim()&&!query.address.trim()&&!query.locationShare.trim()&&!query.longitude.trim()&&!query.latitude.trim())||!!busy} onClick={search}>{busy==="search"?"正在智能查找…":"查找门店"}</button>
               </div>
             </div>
+            {searchWarnings.length>0&&<div className="single-search-feedback" role="status">{searchWarnings.map((warning,index)=><p key={index}>{warning}</p>)}</div>}
+            {busy==="search"&&<button type="button" className="outline" onClick={()=>{singleSearch.current.controller?.abort();singleSearch.current.sequence++;setBusy("");setSearchWarnings(["已取消本次搜索；已发出的地图请求可能仍在结束处理中。"])}}>取消本次搜索</button>}
             {candidates.length>0 && <div className="candidates">
               <h3>找到 {candidates.length} 个候选位置 <small>请核对名称、城市和地址</small></h3>
               {candidates.map((c,i)=><article key={c.id} className={selected?.id===c.id?"chosen":""}>
-                <div className="rank">{i+1}</div><div className="candidate-main"><h4>{c.name}<span>{c.type}</span></h4><p>{c.city} · {c.district}　{c.address}</p><p className="amap-rating">高德评分：{formatAmapRating(c.rating)}</p><StoreContact tel={c.tel} poiId={c.id}/><small>POI ID {c.id}　坐标 {c.location.join(", ")}</small></div>
-                <div className="score"><b>{c.score}</b><span>匹配分</span><small>{c.status}</small></div>
+                <div className="rank">{i+1}</div><div className="candidate-main"><h4>{c.name}<span>{c.type}</span></h4><p>{c.city} · {c.district}　{c.address}</p><p className="amap-rating">高德评分：{formatAmapRating(c.rating)}</p><StoreContact tel={c.tel} poiId={/^B[A-Z0-9]{9}$/i.test(c.id)?c.id:null}/><small>{/^B[A-Z0-9]{9}$/i.test(c.id)?`POI ID ${c.id}`:"位置候选（无高德 POI ID）"}　坐标 {c.location.join(", ")}</small></div>
+                <div className="score"><b>{c.source==="history_verified"?"人工":c.score}</b><span>{c.source==="history_verified"?"位置核实":"匹配分"}</span><small>{c.status}</small></div>
                 <div className="why">{(c.breakdown||c.reasons.map(label=>({label,points:0,kind:"match"}))).map((item,j)=><span key={j} className={item.kind}>{item.label}{item.points>0?`：+${item.points}`:""}</span>)}{c.conflicts?.map((text,j)=><strong key={`c${j}`}>警告：{text}，不能自动确认。</strong>)}{c.warnings?.map((text,j)=><em key={`w${j}`}>{text}</em>)}</div>
-                <button className="outline" onClick={()=>confirm(c)}>{selected?.id===c.id?"已确认":"选择此位置"}</button>
+                <button disabled={!!busy} className="outline" onClick={()=>confirm(c)}>{selected?.id===c.id?"已确认":"选择此位置"}</button>
               </article>)}
             </div>}
           </section>
@@ -488,7 +510,7 @@ export default function Page() {
           <div className="flow"><b>批量流程</b><span>上传并选店</span><i>→</i><span>一键连续匹配</span><i>→</i><span>一键完整分析</span><i>→</i><span>详情与对比</span><i>→</i><span>导出报告</span></div>
         </section>}
 
-        {(tab==="brands"||brandVisited)&&<div hidden={tab!=="brands"}><BrandStoreLibrary isAdmin={auth.user?.role==="admin"} isActive={tab==="brands"} section={brandSection} setSection={setBrandSection} scrollMemory={brandScrollMemory} onReady={onBrandLibraryReady}/></div>}
+        {(tab==="brands"||brandVisited)&&<div hidden={tab!=="brands"}><BrandStoreLibrary isAdmin={auth.user?.role==="admin"} isActive={tab==="brands"} section={brandSection} setSection={setBrandSection} scrollMemory={brandScrollMemory} onReady={onBrandLibraryReady} onStartHistoryAnalysis={startHistoryAnalysis}/></div>}
 
         {mountedAsyncTabs.includes("jobs")&&<div hidden={tab!=="jobs"}><Jobs api={API} focusJobId={batchJob?.job_id||null} isActive={tab==="jobs"}/></div>}
         {mountedAsyncTabs.includes("exports")&&<div hidden={tab!=="exports"}><BatchExport api={API}/></div>}
@@ -499,7 +521,7 @@ export default function Page() {
   );
 }
 
-function BrandStoreLibrary({isAdmin,isActive,section,setSection,scrollMemory,onReady}:{isAdmin:boolean;isActive:boolean;section:BrandLibrarySection;setSection:(section:BrandLibrarySection)=>void;scrollMemory:ScrollMemory;onReady?:(contentReady?:boolean)=>void}){
+function BrandStoreLibrary({isAdmin,isActive,section,setSection,scrollMemory,onReady,onStartHistoryAnalysis}:{isAdmin:boolean;isActive:boolean;section:BrandLibrarySection;setSection:(section:BrandLibrarySection)=>void;scrollMemory:ScrollMemory;onReady?:(contentReady?:boolean)=>void;onStartHistoryAnalysis?:(data:HistoryAnalysisStart)=>void}){
   const [jobsError,setJobsError]=useState("");
   const [options,setOptions]=useState<BrandLibraryOptions|null>(null),[cities,setCities]=useState<Array<{name:string;adcode:string}>>([]),[libraryFacets,setLibraryFacets]=useState<Array<{brand_name:string;province:string;city:string;district:string;count:number}>>([]),[jobs,setJobs]=useState<BrandLibraryJob[]>([]),[notice,setNotice]=useState(""),[busy,setBusy]=useState("");
   const workspaceRef=useRef<HTMLDivElement>(null);
@@ -587,7 +609,7 @@ function BrandStoreLibrary({isAdmin,isActive,section,setSection,scrollMemory,onR
     <div className="brand-library-tabs"><button className={section==="library"?"on":""} onClick={()=>switchSection("library")}>品牌门店库</button><button className={section==="dashboard"?"on":""} onClick={()=>switchSection("dashboard")}>门店看板</button><button className={section==="history"?"on":""} onClick={()=>switchSection("history")}>历史活动数据</button><button className={section==="tasks"?"on":""} onClick={()=>switchSection("tasks")}>查询任务 {jobs.some(job=>["等待执行","正在读取区域","正在查询","等待继续"].includes(job.status))?"●":""}</button><button className={section==="analysis"?"on":""} onClick={()=>switchSection("analysis")}>POI条件反查</button>{isAdmin&&<button className={section==="deleted"?"on":""} onClick={()=>switchSection("deleted")}>已删除门店</button>}</div>
     {section!=="dashboard"&&section!=="history"&&<section className="panel brand-library-query"><div className="section-title"><span>01</span><div><h2>建立省市品牌门店库</h2><p>可直接选择全国，覆盖所有省市区县；选择具体省份时，不选城市代表查询全省。系统在后台逐区域检索。</p></div></div><div className="library-query-grid"><label>省份<select value={queryForm.province} onChange={event=>setQueryForm({...queryForm,province:event.target.value,cities:[]})}>{options?.provinces.map(province=><option key={province}>{province}</option>)}</select></label><div className="city-picker"><div className="selection-heading"><span>城市（可多选）</span>{queryForm.province!=="全国"&&<SelectionActions scope="查询城市" disabled={!cities.length} onSelectAll={()=>setQueryForm({...queryForm,cities:cities.map(city=>city.name)})} onClear={()=>setQueryForm({...queryForm,cities:[]})}/>}</div>{queryForm.province!=="全国"&&<small className="selection-note">清空城市后，按全省查询</small>}<div data-scroll-memory="brand-query-cities">{queryForm.province==="全国"?<span>已选择全国所有省份、城市及区县</span>:cities.map(city=><button key={city.adcode||city.name} className={queryForm.cities.includes(city.name)?"on":""} onClick={()=>toggleString(city.name,queryForm.cities,next=>setQueryForm({...queryForm,cities:next}))}>{city.name}</button>)}</div></div><label className="brand-picker">品牌（可多选）<div data-scroll-memory="brand-query-brands"><button className={approvedBrands.length>0&&queryForm.brands.length===approvedBrands.length?"on":""} onClick={()=>setQueryForm({...queryForm,brands:approvedBrands.map(brand=>brand.name)})}>全选</button><button onClick={()=>setQueryForm({...queryForm,brands:[]})}>清空</button>{approvedBrands.map(brand=><button key={brand.id} className={queryForm.brands.includes(brand.name)?"on":""} onClick={()=>toggleString(brand.name,queryForm.brands,next=>setQueryForm({...queryForm,brands:next}))}>{brand.name}</button>)}</div></label><label>其余品牌<input value={queryForm.custom_brand} onChange={event=>setQueryForm({...queryForm,custom_brand:event.target.value})} placeholder="可选，输入后直接加入本次查询"/></label></div><div className="library-query-actions"><label><input type="checkbox" checked={queryForm.force_refresh} onChange={event=>setQueryForm({...queryForm,force_refresh:event.target.checked})}/> 忽略30天缓存，重新从高德更新</label><button className="primary" disabled={busy!==""} onClick={startDiscovery}>{busy==="discover"?"正在创建…":"开始后台查询"}</button></div><p className="disclaimer">预设品牌按已确认的名称及零食／超市／购物分类证据初筛（爱零食也允许超市、便利店）。仅接受结果计入默认门店数和看板；缺少标签、名称不明确或零食证据与其他分类冲突的候选可在下方“待核验（名称／标签）”查看；名称明确无关、仓库或标注暂停营业／装修中等记录排除。优味多、吃货基地、加一加、馋不二、零小惠、好特卖、奉鲜鲜果、购物猩、同喜铺子、零食优选包含零食店、超市、便利店和折扣店；其他新增品牌名称正常但分类或标签不符时保留待核验；优味多的标准分店名称优先纳入，放宽常见餐饮、糕饼等标签，明显异业或缺少证据仍需核验。其余品牌沿用各自已确认的分类规则。规则不是品牌归属认证。30天内优先复用已有查询缓存（含部分结果）；需要补全时可勾选忽略缓存重新查询。查询结果受高德接口覆盖范围及分页限制，不等同于品牌总部官方门店名册。其余品牌由用户直接添加并立即参与本次查询。{options&&` 今日高德调用已记录 ${options.usage.used} 次，系统当前不设调用上限。`}</p></section>}
     {section==="dashboard"&&<BrandDashboard request={request} isAdmin={isAdmin} active={isActive} onViewStores={(province,brands)=>{setFilters({brands,provinces:[province],cities:[],district:"",keyword:"",status:"",analyzed:"",review_status:""});setPage(1);setLibraryReload(v=>v+1);setSection("library")}}/>}
-    <div hidden={section!=="history"}><HistoryActivities active={isActive&&section==="history"} isAdmin={isAdmin} api={API} brands={approvedBrands.map(brand=>brand.name)}/></div>
+    <div hidden={section!=="history"}><HistoryActivities active={isActive&&section==="history"} isAdmin={isAdmin} api={API} brands={approvedBrands.map(brand=>brand.name)} onStartAnalysis={onStartHistoryAnalysis}/></div>
     {bulkReviewTarget&&<BrandPoiReviewDialog name="所选门店" poiId="" count={bulkReviewTarget.ids.length} action={bulkReviewTarget.action} onClose={()=>setBulkReviewTarget(null)} onSubmit={async reason=>{const result=await request<BrandReviewResult&{selected:number}>("/admin/brand-library/poi-reviews/bulk",{method:"POST",body:JSON.stringify({store_ids:bulkReviewTarget.ids,decision:bulkReviewTarget.action,reason})});setBulkReviewTarget(null);setSelectedIds([]);refreshLibraryPreservingPosition();void loadLibraryFacets();setPreview(null);setNotice(brandReviewFeedback(bulkReviewTarget.action,result))}}/>}
     {nameReviewTarget&&<BrandPoiReviewDialog name={nameReviewTarget.store.amap_name} poiId={nameReviewTarget.store.amap_poi_id} storeId={nameReviewTarget.store.id} action={nameReviewTarget.action} onClose={()=>setNameReviewTarget(null)} onSubmit={async reason=>{const result=await request<BrandReviewResult>("/admin/brand-library/poi-reviews",{method:"POST",body:JSON.stringify({...nameReviewTarget.store.amap_poi_id?{poi_id:nameReviewTarget.store.amap_poi_id}:{store_id:nameReviewTarget.store.id},decision:nameReviewTarget.action,reason})});setNotice(brandReviewFeedback(nameReviewTarget.action,result));setNameReviewTarget(null);refreshLibraryPreservingPosition();void loadLibraryFacets();setSelectedIds([]);setPreview(null)}}/>}
     {isAdmin&&section==="deleted"&&<RemovedBrandStores request={request} onChanged={()=>{setLibraryReload(v=>v+1);void loadLibraryFacets()}}/>}

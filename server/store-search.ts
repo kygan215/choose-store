@@ -18,6 +18,9 @@ export type StoreSearchPlan={
   region:string;queries:string[];brand_aliases:string[];location_hints:string[];address_hints:string[];
 };
 export type AmapSearch=((path:string,params:Record<string,string|number|boolean>)=>Promise<SearchRow>)&{isCached?:(path:string,params:Record<string,string|number|boolean>)=>boolean};
+export type StoreSearchDiagnostics={requests:number;max_requests:number;budget_exhausted:boolean;failed_stages:string[];warnings:string[];location_hints?:{name:string;address:string;longitude:number|null;latitude:number|null;poi_id?:string;poi_verified:boolean}};
+export type StoreCandidateList=StoreCandidate[]&{diagnostics:StoreSearchDiagnostics};
+export function withStoreSearchDiagnostics<T>(rows:T[],diagnostics:StoreSearchDiagnostics):T[]&{diagnostics:StoreSearchDiagnostics}{Object.defineProperty(rows,"diagnostics",{value:diagnostics,enumerable:false,configurable:true});return rows as T[]&{diagnostics:StoreSearchDiagnostics}}
 export type BrandStoreDiscoveryResult={
   assessments?:SearchRow[];stores:StoreCandidate[];brand:string;city:string;district:string;regions:string[];
   requests:number;page_size:number;truncated:boolean;complete:boolean;
@@ -115,7 +118,7 @@ function stripPrefix(value:string,aliases:string[]){
   return result;
 }
 
-export function buildStoreSearchPlan(input:string,city="",district=""):StoreSearchPlan{
+export function buildStoreSearchPlan(input:string,city="",district="",address=""):StoreSearchPlan{
   const original=clean(input),brandMatch=findBrand(original),brand=brandMatch?.group.canonical||"",brandAliases=brandMatch?.group.aliases||[];
   let remainder=brandMatch?.alias?original.slice(brandMatch.alias.length):original;
   const provinceToken=PROVINCES.find(item=>remainder.startsWith(item))||"";
@@ -136,7 +139,7 @@ export function buildStoreSearchPlan(input:string,city="",district=""):StoreSear
   const resolvedDistrict=clean(district)||(inferredDistrict?`${inferredDistrict}区`:"");
   const compact=brand&&core?`${brand}${core}店`:core;
   const queries=unique([original,compact,brand&&core?`${brand} ${core}`:"",core,brand&&core?`${core} ${brand}`:""]);
-  return {original,brand,core,province,city:resolvedCity,district:resolvedDistrict,region:resolvedCity,queries,brand_aliases:brandAliases,location_hints:extractLocationHints(`${resolvedCity}${resolvedDistrict}${core}`),address_hints:[]};
+  return {original,brand,core,province,city:resolvedCity,district:resolvedDistrict,region:resolvedCity,queries,brand_aliases:brandAliases,location_hints:unique([...extractLocationHints(`${resolvedCity}${resolvedDistrict}${core}`),...extractLocationHints(address)]),address_hints:extractLocationHints(address)};
 }
 
 function bigrams(value:string){const text=normalizeStoreName(value);if(text.length<2)return new Set(text?[text]:[]);return new Set(Array.from({length:text.length-1},(_,index)=>text.slice(index,index+2)))}
@@ -269,19 +272,28 @@ export async function discoverBrandStores(amap:AmapSearch,brandInput:string,city
   return {stores,...(isPolicyBrand(brand)?{assessments:[...assessments.values()]}:{}),brand:plan.brand||brand,city,district,regions:[...observed],requests,page_size:pageSize,truncated,complete:!truncated};
 }
 
-export async function searchStoreCandidates(amap:AmapSearch,input:string,city="",district="",address="",maxRequests=6){
-  const searchInput=deriveStoreSearchInput(input,address);if(!searchInput)return [];
+export async function searchStoreCandidates(amap:AmapSearch,input:string,city="",district="",address="",maxRequests=6):Promise<StoreCandidateList>{
+  const budget=Number.isFinite(maxRequests)?Math.max(1,Math.min(12,Math.floor(maxRequests))):6;
+  const diagnostics:StoreSearchDiagnostics={requests:0,max_requests:budget,budget_exhausted:false,failed_stages:[],warnings:[]};
+  const searchInput=deriveStoreSearchInput(input,address);if(!searchInput)return withStoreSearchDiagnostics([],diagnostics);
   const plan=buildStoreSearchPlan(searchInput,city,district),found=new Map<string,StoreCandidate>();
   const addressText=clean(address),addressDerived=addressText?deriveStoreSearchInput("",addressText):"";
   plan.address_hints=extractLocationHints(addressText);plan.location_hints=unique([...plan.location_hints,...plan.address_hints]);
   plan.queries=unique([plan.original,plan.queries[1],addressDerived!==searchInput?addressDerived:"",addressText,plan.core,...plan.queries.slice(2)]);
-  let requestCount=0;const call:AmapSearch=(path,params)=>requestCount>=Math.max(1,maxRequests)?Promise.resolve({status:"1",pois:[],tips:[]}):(requestCount++,amap(path,params));
+  const warn=(message:string)=>{if(!diagnostics.warnings.includes(message))diagnostics.warnings.push(message)};
+  async function call(stage:string,path:string,params:Record<string,string|number|boolean>){
+    if(diagnostics.requests>=budget){diagnostics.budget_exhausted=true;warn(`检索预算已用完，未执行${stage}；可补充地址或坐标继续检索`);return null}
+    diagnostics.requests++;
+    try{return await amap(path,params)}catch(error){if(error instanceof Error&&error.constructor.name==="QuotaPauseError")throw error;diagnostics.failed_stages.push(stage);warn(`${stage}接口暂时失败；该阶段未完成，不能视为没有门店`);return null}
+  }
   let anchorRows:SearchRow[]=[];
+  // Reserve two calls for landmark + around. Tips/detail may use only the spare
+  // budget; never replace a skipped API call with a fabricated empty response.
   for(const query of plan.queries){
-    if(requestCount>=Math.max(1,maxRequests-2))break;
+    if(diagnostics.requests>=Math.min(addressText?3:2,Math.max(1,budget-2)))break;
     const params:Record<string,string|number|boolean>={keywords:query,show_fields:"business,navi,photos",page_size:20,page_num:1};
     if(plan.region){params.region=plan.region;params.city_limit=true}
-    const data=await call("/v5/place/text",params),rows=Array.isArray(data.pois)?data.pois as SearchRow[]:[];
+    const data=await call("文字搜索","/v5/place/text",params),rows=Array.isArray(data?.pois)?data.pois as SearchRow[]:[];
     if(query===plan.core)anchorRows=rows;
     for(const row of rows)mergeCandidate(found,scoreStoreCandidate(row,plan,"text",query));
     const best=[...found.values()].sort((a,b)=>b.score-a.score)[0];
@@ -289,40 +301,45 @@ export async function searchStoreCandidates(amap:AmapSearch,input:string,city=""
   }
   let ranked=[...found.values()].sort((a,b)=>b.score-a.score);
   if(!ranked.some(item=>item.auto_confirm)){
+    const reserve=plan.brand&&plan.core?(anchorRows.length?1:2):0;
+    if(budget-diagnostics.requests>reserve){
     const params:Record<string,string|number|boolean>={keywords:plan.original};
     if(plan.region){params.city=plan.region;params.citylimit=true}
-    const tipData=await call("/v3/assistant/inputtips",params),tips=Array.isArray(tipData.tips)?tipData.tips as SearchRow[]:[];
+    const tipData=await call("输入提示","/v3/assistant/inputtips",params),tips=Array.isArray(tipData?.tips)?tipData.tips as SearchRow[]:[];
     for(const tip of tips){
       let candidate=tip;
       // Input tips usually omit business/category evidence. Verify their POI ID
       // before treating a brand name as a snack shop, within the request budget.
       if((plan.brand||/零食/.test(plan.original))&&!isSnackRetailStore(tip)){
-        if(!clean(tip.id)||!parseLocation(tip.location)||requestCount>=Math.max(1,maxRequests))continue;
-        const detail=await call("/v5/place/detail",{id:clean(tip.id),show_fields:"business,navi,photos"});
-        const rows=Array.isArray(detail.pois)?detail.pois as SearchRow[]:[];
+        if(!clean(tip.id)||!parseLocation(tip.location))continue;
+        if(budget-diagnostics.requests<=reserve){diagnostics.budget_exhausted=true;warn("已为地标和附近门店召回预留请求，部分输入提示详情未执行；未核验提示不等于没有门店");continue}
+        const detail=await call("提示门店详情","/v5/place/detail",{id:clean(tip.id),show_fields:"business,navi,photos"});
+        const rows=Array.isArray(detail?.pois)?detail.pois as SearchRow[]:[];
         const matched=rows.find(row=>clean(row.id)===clean(tip.id));if(!matched)continue;
         candidate={...tip,...matched};
       }
       mergeCandidate(found,scoreStoreCandidate(candidate,plan,"inputtips",plan.original));
     }
     ranked=[...found.values()].sort((a,b)=>b.score-a.score);
+    }else{diagnostics.budget_exhausted=true;warn("已为地标和附近门店召回预留请求，输入提示未执行；检索结果不代表该区域没有门店")}
   }
   if(!ranked.some(item=>item.auto_confirm)&&plan.brand&&plan.core){
     if(!anchorRows.length){
       const params:Record<string,string|number|boolean>={keywords:plan.core,show_fields:"business,navi,photos",page_size:10,page_num:1};
       if(plan.region){params.region=plan.region;params.city_limit=true}
-      const anchorData=await call("/v5/place/text",params);anchorRows=Array.isArray(anchorData.pois)?anchorData.pois as SearchRow[]:[];
+      const anchorData=await call("地标搜索","/v5/place/text",params);anchorRows=Array.isArray(anchorData?.pois)?anchorData.pois as SearchRow[]:[];
     }
-    const anchor=anchorRows.map(row=>({row,location:parseLocation(row.location)})).find(item=>item.location);
+    const anchor=anchorRows.map(row=>({row,location:parseLocation(row.location)})).find(item=>item.location&&(!plan.city||!clean(item.row.cityname||item.row.city)||includesRegion(clean(item.row.cityname||item.row.city),plan.city,/市$/)));
     if(anchor?.location){
-      const nearby=await call("/v5/place/around",{location:anchor.location.join(","),radius:3000,keywords:plan.brand,sortrule:"distance",show_fields:"business,navi,photos",page_size:25,page_num:1});
-      for(const row of (Array.isArray(nearby.pois)?nearby.pois as SearchRow[]:[]))mergeCandidate(found,scoreStoreCandidate(row,plan,"landmark_nearby",plan.brand));
+      const nearby=await call("地标附近门店搜索","/v5/place/around",{location:anchor.location.join(","),radius:3000,keywords:plan.brand,sortrule:"distance",show_fields:"business,navi,photos",page_size:25,page_num:1});
+      for(const row of (Array.isArray(nearby?.pois)?nearby.pois as SearchRow[]:[]))mergeCandidate(found,scoreStoreCandidate(row,plan,"landmark_nearby",plan.brand));
     }
     ranked=[...found.values()].sort((a,b)=>b.score-a.score);
   }
   if(address)ranked=ranked.map(item=>({...item,reasons:unique([...item.reasons,"已参考用户填写的详细地址"])}));
-  return classifyResolutionCandidates(ranked.slice(0,20)).candidates.map(candidate =>
+  const candidates=classifyResolutionCandidates(ranked.slice(0,20)).candidates.map(candidate =>
     (plan.brand || /零食/.test(plan.original)) && !isSnackRetailStore(candidate)
       ? {...candidate,auto_confirm:false,requires_review:true,status:"标签待核验"}
       : candidate);
+  return withStoreSearchDiagnostics(candidates.map(candidate=>({...candidate,warnings:unique([...candidate.warnings,...diagnostics.warnings])})),diagnostics);
 }

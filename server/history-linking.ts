@@ -29,16 +29,20 @@ export async function historyLinkCollisions(runQuery:RunQuery,tenantId:number,li
  JOIN brand_stores b ON b.id=x.brand_store_id AND b.tenant_id=$1
  ), resolved AS (
  SELECT h.id history_store_id,COALESCE(i.brand_store_id,h.brand_store_id) brand_store_id,
- COALESCE(i.identity,CASE WHEN btrim(COALESCE(b.amap_poi_id,''))<>'' THEN 'poi:'||upper(btrim(b.amap_poi_id)) ELSE 'record:'||b.id::text END) identity,
+ COALESCE(i.identity,CASE WHEN btrim(COALESCE(b.amap_poi_id,''))<>'' THEN 'poi:'||upper(btrim(b.amap_poi_id)) WHEN b.id IS NOT NULL THEN 'record:'||b.id::text WHEN h.poi_id ~* '^B[A-Z0-9]{9}$' THEN 'poi:'||upper(btrim(h.poi_id)) WHEN s.amap_poi_id ~* '^B[A-Z0-9]{9}$' THEN 'poi:'||upper(btrim(s.amap_poi_id)) WHEN s.brand_store_id IS NOT NULL THEN 'record:'||s.brand_store_id::text END) identity,
  i.history_store_id IS NOT NULL requested,h.store_name
  FROM history_stores h LEFT JOIN incoming i ON i.history_store_id=h.id
  LEFT JOIN brand_stores b ON b.id=h.brand_store_id AND b.tenant_id=h.tenant_id
+ LEFT JOIN stores s ON s.history_store_id=h.id AND s.tenant_id=h.tenant_id
  WHERE h.tenant_id=$1 AND (i.history_store_id IS NOT NULL OR h.brand_store_id IN (SELECT brand_store_id FROM incoming)
+ OR s.brand_store_id IN (SELECT brand_store_id FROM incoming)
+ OR (h.poi_id IS NOT NULL AND upper(btrim(h.poi_id)) IN (SELECT upper(btrim(amap_poi_id)) FROM incoming WHERE btrim(COALESCE(amap_poi_id,''))<>''))
+ OR (s.amap_poi_id IS NOT NULL AND upper(btrim(s.amap_poi_id)) IN (SELECT upper(btrim(amap_poi_id)) FROM incoming WHERE btrim(COALESCE(amap_poi_id,''))<>''))
  OR (b.amap_poi_id IS NOT NULL AND upper(btrim(b.amap_poi_id)) IN (SELECT upper(btrim(amap_poi_id)) FROM incoming WHERE btrim(COALESCE(amap_poi_id,''))<>'')))
  ) SELECT MIN(r.brand_store_id) brand_store_id,r.identity,a.start_date::text,a.end_date::text,
  ARRAY_AGG(DISTINCT a.history_store_id) history_store_ids,ARRAY_AGG(DISTINCT r.store_name) store_names
  FROM resolved r JOIN history_activities a ON a.history_store_id=r.history_store_id AND a.tenant_id=$1 AND a.revoked_at IS NULL
- WHERE r.brand_store_id IS NOT NULL GROUP BY r.identity,a.start_date,a.end_date
+ WHERE r.identity IS NOT NULL GROUP BY r.identity,a.start_date,a.end_date
  HAVING COUNT(DISTINCT a.history_store_id)>1 AND BOOL_OR(r.requested) LIMIT 100`,[tenantId,JSON.stringify(links)])).rows;
 }
 
@@ -50,6 +54,8 @@ export async function applyHistoryLinks(client:PoolClient,tenantId:number,userId
  if(histories.length!==links.length||targets.length!==targetIds.length)throw new HistoryLinkError("部分历史门店或品牌库门店不存在，或不属于当前组织",404,"HISTORY_LINK_NOT_FOUND");
  const issues:Row[]=[];
  for(const link of links){const h=histories.find(row=>Number(row.id)===link.history_store_id)!,b=targets.find(row=>Number(row.id)===link.brand_store_id)!;for(const reason of historyLinkIdentityIssues(h,b))issues.push({...link,store_name:h.store_name,target_name:b.amap_name,reason})}
+ const analyses=(await client.query("SELECT id,history_store_id,amap_poi_id,brand_store_id FROM stores WHERE tenant_id=$1 AND history_store_id=ANY($2::bigint[])",[tenantId,sourceIds])).rows;
+ for(const link of links){const b=targets.find(row=>Number(row.id)===link.brand_store_id)!,next=String(b.amap_poi_id||"").trim().toUpperCase();for(const s of analyses.filter(row=>Number(row.history_store_id)===link.history_store_id)){const previous=String(s.amap_poi_id||"").trim().toUpperCase();if((/^B[A-Z0-9]{9}$/.test(previous)&&previous!==next)||(s.brand_store_id&&Number(s.brand_store_id)!==link.brand_store_id&&!(previous&&previous===next)))issues.push({...link,analysis_store_id:s.id,reason:"该历史档案已有不同门店身份的分析关联，请先核对"})}}
  if(issues.length)throw new HistoryLinkError("关联信息不一致，请核对下方门店后重试",409,"HISTORY_IDENTITY_MISMATCH",{issues});
  const collisions=await historyLinkCollisions((sql,values)=>client.query(sql,values),tenantId,links);
  if(collisions.length)throw new HistoryLinkError("同一 POI 在相同活动日期已有多份历史记录，请先核对，系统未保存本次关联",409,"HISTORY_ACTIVITY_DUPLICATE",{store_conflicts:collisions.map(row=>({...row,reason:`${row.start_date} 至 ${row.end_date} 存在相同 POI 的多份活动：${(row.store_names as string[]).join("、")}`}))});

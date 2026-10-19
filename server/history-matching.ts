@@ -29,15 +29,19 @@ export async function validateExactHistoryLinks(tenantId:number,links:Array<{his
  if(links.some(l=>valid.get(l.history_store_id)!==l.brand_store_id))throw new Error("匹配候选已变化或不再唯一，请重新预览后确认");
 }
 export async function cacheHistoryCandidates(tenantId:number,source:Row,candidates:Row[],error:string|null=null){
- await query(`INSERT INTO history_poi_candidates(tenant_id,history_store_id,source_name,source_brand,source_province,source_city,candidates_json,error_message) VALUES($1,$2,$3,$4,$5,$6,$7,$8)
- ON CONFLICT(tenant_id,history_store_id) DO UPDATE SET source_name=EXCLUDED.source_name,source_brand=EXCLUDED.source_brand,source_province=EXCLUDED.source_province,source_city=EXCLUDED.source_city,candidates_json=EXCLUDED.candidates_json,error_message=EXCLUDED.error_message,checked_at=now()`,[tenantId,source.id,source.store_name,source.brand_name,source.province,source.city,JSON.stringify(candidates),error]);
+ await query(`INSERT INTO history_poi_candidates(tenant_id,history_store_id,source_name,source_brand,source_province,source_city,candidates_json,error_message,source_location_version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+ ON CONFLICT(tenant_id,history_store_id) DO UPDATE SET source_name=EXCLUDED.source_name,source_brand=EXCLUDED.source_brand,source_province=EXCLUDED.source_province,source_city=EXCLUDED.source_city,candidates_json=EXCLUDED.candidates_json,error_message=EXCLUDED.error_message,source_location_version=EXCLUDED.source_location_version,checked_at=now()`,[tenantId,source.id,source.store_name,source.brand_name,source.province,source.city,JSON.stringify(candidates),error,source.location_version||0]);
 }
 export async function processHistoryMatchJob(id:number,tenantId:number,userId:number){
  const job=(await query("SELECT * FROM history_match_jobs WHERE id=$1 AND tenant_id=$2 AND created_by=$3",[id,tenantId,userId])).rows[0];if(!job)throw new Error("候选查询任务不存在");
  await query("UPDATE history_match_jobs SET status='running',error_message=NULL,updated_at=now() WHERE id=$1",[id]);
  const ids=(job.store_ids_json as number[]).slice(Number(job.processed)),errors:string[]=[];
  for(const storeId of ids){const source=(await query("SELECT * FROM history_stores WHERE tenant_id=$1 AND id=$2 AND brand_store_id IS NULL",[tenantId,storeId])).rows[0];
-  if(source)try{const candidates=await resolveStoreCandidates({originalName:source.store_name,searchName:source.store_name,province:source.province,city:source.city,address:source.address,poiId:source.poi_id},async(path,params)=>{await consumeBackgroundQuota(tenantId,{userId,sourceType:"history_matching",sourceId:id,operation:"history_candidate_search",details:{path,page:params.page_num||params.page}});return amapRequest(path,params)});await cacheHistoryCandidates(tenantId,source,candidates.filter(p=>/^B[A-Z0-9]{9}$/i.test(p.id)) as unknown as Row[])}
+  if(source)try{const candidates=await resolveStoreCandidates({originalName:source.store_name,searchName:source.store_name,province:source.province,city:source.city,address:source.verified_address||source.address,longitude:source.verified_longitude,latitude:source.verified_latitude,poiId:source.poi_id},async(path,params)=>{await consumeBackgroundQuota(tenantId,{userId,sourceType:"history_matching",sourceId:id,operation:"history_candidate_search",details:{path,page:params.page_num||params.page}});return amapRequest(path,params)});
+   const diagnostics=candidates.diagnostics,incomplete=Boolean(diagnostics.failed_stages.length||diagnostics.budget_exhausted),message=incomplete?[...new Set(diagnostics.warnings)].join("；"):null;
+   await cacheHistoryCandidates(tenantId,source,candidates.filter(p=>/^B[A-Z0-9]{9}$/i.test(p.id)) as unknown as Row[],message);
+   if(incomplete){errors.push(`#${storeId} ${message||"检索未完整执行"}`);recordOps({tenantId,service:"worker",level:"warn",module:"history_matching",event:"candidate_search_incomplete",message:message||"检索未完整执行，不能认定该门店不存在",taskType:"history_matching",taskId:String(id),details:{history_store_id:storeId,requests:diagnostics.requests,failed_stages:diagnostics.failed_stages,budget_exhausted:diagnostics.budget_exhausted}})}
+  }
   catch(error){const message=error instanceof Error?error.message:"候选查询失败";errors.push(`#${storeId} ${message}`);await cacheHistoryCandidates(tenantId,source,[],message);recordOps({tenantId,service:"worker",level:"warn",module:"history_matching",event:"candidate_search_failed",message,taskType:"history_matching",taskId:String(id)})}
   await query("UPDATE history_match_jobs SET processed=processed+1,updated_at=now() WHERE id=$1",[id]);
  }

@@ -4,7 +4,7 @@ import type { Poi, Row } from "./services.js";
 import { matchedAmapRating } from "../app/amap-rating.js";
 import { getHistoricalExportData } from "./history-export-data.js";
 import { parseHistoryExportOptions } from "./history-export-options.js";
-import { resolveTaskBrandStoreIds } from "./history-export-resolve.js";
+import { resolveTaskBrandStoreIds, resolveTaskHistoryStoreIds } from "./history-export-resolve.js";
 import { addHistoricalDetailSheet, HISTORY_SUMMARY_HEADERS, historyRefundBasisByStore, historySummaryCells } from "./history-export-workbook.js";
 
 export const EXPORT_BASE_FIELDS = [
@@ -77,18 +77,25 @@ function styleHeader(row:ExcelJS.Row){row.height=25;row.eachCell(cell=>{cell.fon
 function fitColumns(sheet:ExcelJS.Worksheet,min=12,max=36){sheet.columns.forEach(column=>{let width=min;column.eachCell?.({includeEmpty:true},cell=>{const length=cell.value instanceof Date?19:String(cell.value??"").length;width=Math.max(width,Math.min(max,length+3))});column.width=width})}
 function prepareSheet(sheet:ExcelJS.Worksheet){sheet.views=[{state:"frozen",ySplit:1}];sheet.autoFilter={from:{row:1,column:1},to:{row:1,column:Math.max(1,sheet.columnCount)}};styleHeader(sheet.getRow(1));sheet.eachRow((row,index)=>{if(index>1&&index%2===1)row.eachCell(cell=>{cell.fill={type:"pattern",pattern:"solid",fgColor:{argb:"FFF4F8F6"}}})})}
 
-export type BatchHistoryDependencies={resolveTaskBrandStoreIds?:typeof resolveTaskBrandStoreIds;getHistoricalExportData?:typeof getHistoricalExportData};
+export type BatchHistoryDependencies={resolveTaskBrandStoreIds?:typeof resolveTaskBrandStoreIds;resolveTaskHistoryStoreIds?:typeof resolveTaskHistoryStoreIds;getHistoricalExportData?:typeof getHistoricalExportData};
 export async function buildBatchExportWorkbook(rows:Row[],aiRows:Row[],selection:ExportSelection,meta:{userEmail:string;jobNames:string[];tenantId?:number},historyDependencies:BatchHistoryDependencies={}){
   const workbook=new ExcelJS.Workbook();workbook.creator="店界 POI";workbook.created=new Date();workbook.modified=new Date();
   const selectedFields=EXPORT_BASE_FIELDS.filter(field=>selection.fields.includes(field.id));
   const poiColumns=selection.radii.flatMap(radius=>selection.categories.map(category=>({radius,category,label:poiColumnLabel(radius,category)})));
   const historyOptions=parseHistoryExportOptions(selection),historyIds=historyOptions.includeHistory?(meta.tenantId?await (historyDependencies.resolveTaskBrandStoreIds||resolveTaskBrandStoreIds)(meta.tenantId,rows):null):null;
   if(historyOptions.includeHistory&&!historyIds)throw new Error("导出历史活动数据需要租户信息");
-  const historyData=historyOptions.includeHistory?await (historyDependencies.getHistoricalExportData||getHistoricalExportData)(meta.tenantId!,[...new Set(historyIds!.values())],historyOptions.historyStartDate,historyOptions.historyEndDate):null;
+  const internalHistoryIds=historyOptions.includeHistory?await (historyDependencies.resolveTaskHistoryStoreIds||resolveTaskHistoryStoreIds)(meta.tenantId!,rows):new Map<number,number>();
+  // A stale or conflicting explicit selection must not silently switch to another identity.
+  for(const row of rows)if(Number(row.history_store_id)>0&&!internalHistoryIds.has(Number(row.id)))historyIds?.delete(Number(row.id));
+  const usedBrandIds=[...new Set([...(historyIds||new Map()).entries()].filter(([id])=>!internalHistoryIds.has(id)).map(([,id])=>id))];
+  const historyData=historyOptions.includeHistory?await (historyDependencies.getHistoricalExportData||getHistoricalExportData)(meta.tenantId!,usedBrandIds,historyOptions.historyStartDate,historyOptions.historyEndDate,[...new Set(internalHistoryIds.values())]):null;
   const historyBasis=historyRefundBasisByStore(historyData?.details||[]);
   const main=workbook.addWorksheet("门店汇总",{properties:{defaultRowHeight:20}});main.addRow(["门店名称","门店地址",...selectedFields.map(field=>field.label),...poiColumns.map(field=>field.label),...(historyOptions.includeHistory?HISTORY_SUMMARY_HEADERS:[])]);
   const aiByStore=new Map(aiRows.map(row=>[Number(row.store_id),row]));
-  for(const row of rows){const pois=Array.isArray(row.pois_json)?row.pois_json as Poi[]:[],ai=aiByStore.get(Number(row.id))||{},config=(row.job_config||{}) as Row,availableRadii=(Array.isArray(config.radii)?config.radii:[]).map(Number),availableCategories=Array.isArray(config.categories)?config.categories.map(String):[],brandStoreId=historyIds?.get(Number(row.id));main.addRow([storeName(row),storeAddress(row),...selectedFields.map(field=>optionalValue(field.id,row,ai)),...poiColumns.map(column=>availableRadii.includes(column.radius)&&availableCategories.includes(column.category)?countPois(pois,column.radius,column.category):""),...(historyOptions.includeHistory?historySummaryCells(brandStoreId?historyData?.summaries.get(brandStoreId):undefined,Boolean(brandStoreId),Boolean(historyOptions.historyStartDate||historyOptions.historyEndDate),brandStoreId?historyBasis.get(brandStoreId):[]):[])])}
+  for(const row of rows){const pois=Array.isArray(row.pois_json)?row.pois_json as Poi[]:[],ai=aiByStore.get(Number(row.id))||{},config=(row.job_config||{}) as Row,availableRadii=(Array.isArray(config.radii)?config.radii:[]).map(Number),availableCategories=Array.isArray(config.categories)?config.categories.map(String):[],brandStoreId=historyIds?.get(Number(row.id)),internalId=internalHistoryIds.get(Number(row.id));
+    const summary=internalId?historyData?.historySummaries?.get(internalId):brandStoreId?historyData?.summaries.get(brandStoreId):undefined;
+    const basis=internalId?summary?.refund_basis_values.map(value=>value==="refunded"?"已扣退款":value==="not_refunded"?"未扣退款":"未知"):brandStoreId?historyBasis.get(brandStoreId):[];
+    main.addRow([storeName(row),storeAddress(row),...selectedFields.map(field=>optionalValue(field.id,row,ai)),...poiColumns.map(column=>availableRadii.includes(column.radius)&&availableCategories.includes(column.category)?countPois(pois,column.radius,column.category):""),...(historyOptions.includeHistory?historySummaryCells(summary,Boolean(internalId||brandStoreId),Boolean(historyOptions.historyStartDate||historyOptions.historyEndDate),basis):[])])}
   prepareSheet(main);fitColumns(main);main.getColumn(1).width=Math.max(20,main.getColumn(1).width||0);main.getColumn(2).width=Math.max(32,main.getColumn(2).width||0);
   if(historyData)addHistoricalDetailSheet(workbook,historyData.details);
   if(selection.includePoiDetails){const detail=workbook.addWorksheet("POI明细");detail.addRow(["门店名称","门店地址","POI名称","POI分类","竞品品牌","竞品关系","POI地址","直线距离（米）","高德人均消费","经度","纬度"]);for(const row of rows)for(const poi of (Array.isArray(row.pois_json)?row.pois_json as Poi[]:[]))detail.addRow([storeName(row),storeAddress(row),text(poi.name),text(poi.category),text(poi.brand),text(poi.competitor_relation),text(poi.address),Number(poi.distance),poi.cost==null?"":Number(poi.cost),Number(poi.location?.[0]),Number(poi.location?.[1])]);prepareSheet(detail);fitColumns(detail)}

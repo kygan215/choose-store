@@ -2,7 +2,7 @@ import ExcelJS from "exceljs";
 
 export type HistoricalExportSummary={activity_count:number;latest_activity_start:string|null;sales_amount:string|null;known_amount_count:number;missing_amount_count:number};
 export type HistoricalExportDetail={
-  brand_store_id:number;history_store_id:number;activity_id:number;
+  brand_store_id:number|null;history_store_id:number;activity_id:number;
   brand_name:string;store_name:string;province:string;city:string;address?:string;
   start_date:string;end_date:string;activity_name:string;sales_amount:string|null;
   refund_basis:string;calendar_tags:string[];
@@ -16,7 +16,7 @@ function money(value:string|null){if(value==null)return "";const number=Number(v
 export function refundBasisLabel(value:string){return value==="refunded"?"已扣退款":value==="not_refunded"?"未扣退款":"未知"}
 export function historyRefundBasisByStore(details:HistoricalExportDetail[]){
   const result=new Map<number,string[]>();
-  for(const detail of details){const id=Number(detail.brand_store_id),labels=result.get(id)||[],label=refundBasisLabel(detail.refund_basis);if(!labels.includes(label))labels.push(label);result.set(id,labels)}
+  for(const detail of details){if(detail.brand_store_id==null)continue;const id=Number(detail.brand_store_id),labels=result.get(id)||[],label=refundBasisLabel(detail.refund_basis);if(!labels.includes(label))labels.push(label);result.set(id,labels)}
   return result;
 }
 
@@ -35,7 +35,7 @@ export function addHistoricalDetailSheet(workbook:ExcelJS.Workbook,details:Histo
   const headers=["当前品牌库门店ID","历史门店档案ID","活动记录ID","活动时品牌","活动时门店名称","活动时省份","活动时城市","活动时地址","活动名称","活动开始日","活动结束日","活动商品原始上报销售额（元）","退款口径","日期标签","来源导入ID","来源工作表","来源单元格"];
   sheet.addRow(headers);
   for(const item of details)sheet.addRow([
-    item.brand_store_id,item.history_store_id,item.activity_id,
+    item.brand_store_id??"",item.history_store_id,item.activity_id,
     safeText(item.brand_name),safeText(item.store_name),safeText(item.province),safeText(item.city),safeText(item.address),
     safeText(item.activity_name),safeText(item.start_date),safeText(item.end_date),money(item.sales_amount),
     refundBasisLabel(item.refund_basis),safeText((item.calendar_tags||[]).join("、")),item.source_import_id??"",safeText(item.source_sheet),safeText(item.source_cell),
