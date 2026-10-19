@@ -20,10 +20,17 @@ x-app-env: &app-env
   APP_ORIGIN: ${APP_ORIGIN:-}
   COOKIE_SECURE: ${COOKIE_SECURE:-false}
 
+x-log-policy: &log-policy
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   postgres:
     image: postgres:17-alpine
     restart: unless-stopped
+    logging: *log-policy
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-storemap}
       POSTGRES_USER: ${POSTGRES_USER:-storemap}
@@ -40,6 +47,7 @@ services:
   redis:
     image: redis:7.4-alpine
     restart: unless-stopped
+    logging: *log-policy
     command: ["redis-server","--appendonly","yes","--maxmemory-policy","noeviction"]
     volumes:
       - redis_data:/data
@@ -55,6 +63,7 @@ services:
       context: .
       target: api
     restart: "no"
+    logging: *log-policy
     environment:
       <<: *app-env
       ADMIN_EMAIL: ${ADMIN_EMAIL}
@@ -71,6 +80,7 @@ services:
       context: .
       target: api
     restart: unless-stopped
+    logging: *log-policy
     environment:
       <<: *app-env
       API_PORT: 8000
@@ -101,6 +111,7 @@ services:
       context: .
       target: api
     restart: unless-stopped
+    logging: *log-policy
     environment:
       <<: *app-env
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-3}
@@ -123,6 +134,7 @@ services:
         NEXT_PUBLIC_AMAP_JS_KEY: ${NEXT_PUBLIC_AMAP_JS_KEY}
         NEXT_PUBLIC_AMAP_SECURITY_CODE: ${NEXT_PUBLIC_AMAP_SECURITY_CODE}
     restart: unless-stopped
+    logging: *log-policy
     environment:
       PORT: 3000
     networks: [internal]
@@ -130,6 +142,7 @@ services:
   nginx:
     image: nginx:1.27-alpine
     restart: unless-stopped
+    logging: *log-policy
     ports:
       - "${HTTP_PORT:-7090}:80"
     volumes:
@@ -142,6 +155,7 @@ services:
   backup:
     image: postgres:17-alpine
     restart: unless-stopped
+    logging: *log-policy
     environment:
       PGPASSWORD: ${POSTGRES_PASSWORD}
     volumes:

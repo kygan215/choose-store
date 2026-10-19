@@ -91,3 +91,5 @@ td .store-contact{align-items:flex-start;flex-direction:column;gap:3px;font-size
 .brand-library-table{height:clamp(320px,55vh,570px);max-height:none;scrollbar-gutter:stable}
 .brand-library-table[aria-busy="true"] tbody{opacity:.55;pointer-events:none}
 .jobs-results-loading{min-height:clamp(260px,45vh,680px);display:flex;align-items:center;justify-content:center;color:var(--muted)}
+
+.sidebar nav a.ops-nav-link{display:block;color:#739d8b;padding:12px 14px;text-decoration:none;font-size:14px;border-radius:8px}.sidebar nav a.ops-nav-link:hover{background:#163e31;color:#e0f3e7}
