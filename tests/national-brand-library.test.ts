@@ -88,5 +88,5 @@ test("品牌任务按配置并行，进度计数不丢失",async()=>{
  const result=await runNational({concurrency:3});assert.equal(result.peak,3);assert.equal(result.job.processed_units,result.saved.length);assert.equal(result.job.status,"已完成");
 });
 test("并行品牌任务暂停后只结束在途查询，不再派发新单元",async()=>{
- const result=await runNational({concurrency:3,pauseDuringQueries:true});assert.equal(result.started,3);assert.equal(result.saved.length,3);assert.notEqual(result.job.status,"已完成");
+ const result=await runNational({concurrency:3,pauseDuringQueries:true});assert.equal(result.started,3);assert.equal(result.saved.length,0);assert.notEqual(result.job.status,"已完成");
 });

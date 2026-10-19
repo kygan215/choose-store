@@ -8,6 +8,8 @@ import { processAiExport } from "./ai-export.js";
 import { consumeBackgroundQuota, isQuotaPauseError, processBrandExport, processDiscoveryJob, quotaResumeDelay } from "./brand-library.js";
 import { matchCandidatesJson } from "./store-match.js";
 import {recordOps,closeOpsLog,safeLogText,logBufferStats} from "./ops-log.js";
+import {REFRESH_DISPATCH_JOB,dispatchBrandRefreshes} from "./brand-refresh.js";
+import {processHistoryMatchJob} from "./history-matching.js";
 
 async function ownerJob(jobId:number,tenantId:number,userId:number){return (await query<Row>("SELECT * FROM jobs WHERE id=$1 AND tenant_id=$2 AND created_by=$3",[jobId,tenantId,userId])).rows[0]}
 async function refreshJob(jobId:number,tenantId:number,userId:number,stage:"match"|"analysis"){
@@ -38,11 +40,13 @@ async function analyzeBatch(jobId:number,tenantId:number,userId:number){
 }
 
 async function processJob(job:Job){
+  if(job.name===REFRESH_DISPATCH_JOB)return dispatchBrandRefreshes();
   if(job.name===DASHBOARD_JOB)return refreshAllBrandDashboards();
   let tenantId=Number(job.data.tenantId||0),userId=Number(job.data.userId||0);
   if(!userId&&job.data.jobId){const legacy=(await query<Row>("SELECT tenant_id,created_by FROM jobs WHERE id=$1",[job.data.jobId])).rows[0];tenantId=Number(legacy?.tenant_id||tenantId);userId=Number(legacy?.created_by||0)}
   if(!userId&&job.data.storeId){const legacy=(await query<Row>("SELECT tenant_id,created_by FROM stores WHERE id=$1",[job.data.storeId])).rows[0];tenantId=Number(legacy?.tenant_id||tenantId);userId=Number(legacy?.created_by||0)}
   if(!tenantId||!userId)throw new Error("任务缺少账号归属信息");
+  if(job.name==="history-candidates")return processHistoryMatchJob(Number(job.data.matchJobId),tenantId,userId);
   if(job.name==="match-batch")return matchBatch(Number(job.data.jobId),Number(tenantId),Number(userId));
   if(job.name==="analyze-batch")return analyzeBatch(Number(job.data.jobId),Number(tenantId),Number(userId));
   if(job.name==="analyze-single"){const {storeId,categories,radii}=job.data,store=(await query<Row>("SELECT * FROM stores WHERE id=$1 AND tenant_id=$2 AND created_by=$3",[storeId,tenantId,userId])).rows[0];if(!store)throw new Error("门店不存在");const pois=await searchPois(store,categories,radii),analysis=createAnalysis(store,pois,radii,categories);await query("UPDATE stores SET pois_json=$1,analysis_json=$2,status='分析完成',updated_at=NOW() WHERE id=$3 AND tenant_id=$4 AND created_by=$5",[JSON.stringify(pois),JSON.stringify(analysis),storeId,tenantId,userId]);return {pois,analysis}}
@@ -55,14 +59,15 @@ async function processJob(job:Job){
 }
 
 const worker=new Worker("store-analysis",async job=>{
-  const started=performance.now(),context={tenantId:Number(job.data.tenantId)||null,service:"worker" as const,module:job.name,taskType:job.name==="discover-brand-stores"?"brand_discovery":job.data.exportId?"export":job.data.jobId?"analysis":"worker",taskId:String(job.data.jobId||job.data.exportId||job.id||""),details:{queue_id:job.id,attempt:job.attemptsMade+1}};
+  const started=performance.now(),context={tenantId:Number(job.data.tenantId)||null,service:"worker" as const,module:job.name,taskType:job.name==="history-candidates"?"history_matching":job.name==="discover-brand-stores"?"brand_discovery":job.data.exportId?"export":job.data.jobId?"analysis":"worker",taskId:String(job.data.matchJobId||job.data.jobId||job.data.exportId||job.id||""),details:{queue_id:job.id,attempt:job.attemptsMade+1}};
   recordOps({...context,level:"info",event:"job_started",message:`开始执行 ${job.name}`});
   try{const result=await processJob(job);recordOps({...context,level:"info",event:"job_completed",message:`执行结束 ${job.name}（具体业务结果见任务状态）`,durationMs:Math.round(performance.now()-started)});return result}
   catch(error){recordOps({...context,level:"error",event:"job_failed",message:error instanceof Error?error.message:"后台任务失败",durationMs:Math.round(performance.now()-started)});throw error}
-},{connection:redisConnection,concurrency:Math.max(1,Math.min(5,Number(process.env.WORKER_CONCURRENCY||3)))});worker.on("failed",(job,error)=>{console.error(JSON.stringify({event:"job_failed",id:job?.id,name:job?.name,error:safeLogText(error.message)}));if(job?.name==="ai-export-batch"&&job.data?.exportId)void query("UPDATE ai_export_jobs SET status='failed',error_message=$1,current_store='',completed_at=NOW(),updated_at=NOW() WHERE id=$2",[error.message,job.data.exportId]);else if(job?.name==="brand-library-export"&&job.data?.exportId)void query("UPDATE brand_export_jobs SET status='failed',error_message=$1,completed_at=NOW(),updated_at=NOW() WHERE id=$2",[error.message,job.data.exportId]);else if(job?.name==="discover-brand-stores"&&job.data?.jobId)void query("UPDATE brand_discovery_jobs SET status='任务执行失败',control='idle',error_message=$1,current_region='',updated_at=NOW() WHERE id=$2",[error.message,job.data.jobId]);else if(job?.data?.jobId&&job.data?.tenantId&&job.data?.userId)void query("UPDATE jobs SET status='任务执行失败',control='idle',current_store='',updated_at=NOW() WHERE id=$1 AND tenant_id=$2 AND created_by=$3",[job.data.jobId,job.data.tenantId,job.data.userId])});
+},{connection:redisConnection,concurrency:Math.max(1,Math.min(5,Number(process.env.WORKER_CONCURRENCY||3)))});worker.on("failed",(job,error)=>{console.error(JSON.stringify({event:"job_failed",id:job?.id,name:job?.name,error:safeLogText(error.message)}));if(job?.name==="history-candidates"&&job.data?.matchJobId)void query("UPDATE history_match_jobs SET status='failed',error_message=$1,updated_at=now() WHERE id=$2",[error.message,job.data.matchJobId]);else if(job?.name==="ai-export-batch"&&job.data?.exportId)void query("UPDATE ai_export_jobs SET status='failed',error_message=$1,current_store='',completed_at=NOW(),updated_at=NOW() WHERE id=$2",[error.message,job.data.exportId]);else if(job?.name==="brand-library-export"&&job.data?.exportId)void query("UPDATE brand_export_jobs SET status='failed',error_message=$1,completed_at=NOW(),updated_at=NOW() WHERE id=$2",[error.message,job.data.exportId]);else if(job?.name==="discover-brand-stores"&&job.data?.jobId)void query("UPDATE brand_discovery_jobs SET status='任务执行失败',control='idle',error_message=$1,current_region='',updated_at=NOW() WHERE id=$2",[error.message,job.data.jobId]);else if(job?.data?.jobId&&job.data?.tenantId&&job.data?.userId)void query("UPDATE jobs SET status='任务执行失败',control='idle',current_store='',updated_at=NOW() WHERE id=$1 AND tenant_id=$2 AND created_by=$3",[job.data.jobId,job.data.tenantId,job.data.userId])});
 worker.on("error",error=>recordOps({service:"worker",level:"error",module:"queue",event:"worker_error",message:error.message}));
 recordOps({service:"worker",level:"info",module:"system",event:"service_started",message:"Worker 服务已启动"});
 await taskQueue.upsertJobScheduler(DASHBOARD_JOB,DASHBOARD_SCHEDULE,{name:DASHBOARD_JOB,data:{},opts:{attempts:3,backoff:{type:"exponential",delay:30000}}});
+await taskQueue.upsertJobScheduler(REFRESH_DISPATCH_JOB,{every:60000},{name:REFRESH_DISPATCH_JOB,data:{},opts:{attempts:3,backoff:{type:"exponential",delay:10000},removeOnComplete:100,removeOnFail:100}});
 await taskQueue.add(DASHBOARD_JOB,{}, {jobId:"brand-dashboard-startup",removeOnComplete:true,removeOnFail:true});
 
 const reportWorkerHeartbeat=async()=>{try{const {getMonitorRedis}=await import("./discovery-monitor.js");await (await getMonitorRedis()).set("storemap:worker:heartbeat",JSON.stringify({at:new Date().toISOString(),metrics:{memory_mb:Math.round(process.memoryUsage().rss/1048576),uptime_seconds:Math.round(process.uptime()),logging:logBufferStats()}}),"EX",45)}catch{console.error(JSON.stringify({event:"worker_heartbeat_unavailable"}))}};

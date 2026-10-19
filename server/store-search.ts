@@ -17,7 +17,7 @@ export type StoreSearchPlan={
   original:string;brand:string;core:string;province:string;city:string;district:string;
   region:string;queries:string[];brand_aliases:string[];location_hints:string[];address_hints:string[];
 };
-export type AmapSearch=(path:string,params:Record<string,string|number|boolean>)=>Promise<SearchRow>;
+export type AmapSearch=((path:string,params:Record<string,string|number|boolean>)=>Promise<SearchRow>)&{isCached?:(path:string,params:Record<string,string|number|boolean>)=>boolean};
 export type BrandStoreDiscoveryResult={
   assessments?:SearchRow[];stores:StoreCandidate[];brand:string;city:string;district:string;regions:string[];
   requests:number;page_size:number;truncated:boolean;complete:boolean;
@@ -205,14 +205,16 @@ export async function discoverBrandStores(amap:AmapSearch,brandInput:string,city
   const plan=buildStoreSearchPlan(brand,city,district),terms=isPolicyBrand(brand)?brandSearchKeywords(brand):unique([plan.brand||brand,...plan.brand_aliases,...(options.aliases||[]),brand]),maxPages=Math.max(1,Math.min(8,Number(options.maxPagesPerRegion||8))),maxRequests=Math.max(1,Math.min(500,Number(options.maxRequests||160))),pageSize=25;
   const municipality=["北京","天津","上海","重庆"].find(name=>withoutSuffix(city,["市"])===name);
   let requests=0,truncated=false;const regions:Array<{label:string;value:string}>=[];
+  const canRequest=(path:string,params:Record<string,string|number|boolean>)=>Boolean(amap.isCached?.(path,params))||requests<maxRequests;
+  const request: AmapSearch=async(path,params)=>{if(!amap.isCached?.(path,params))requests++;return amap(path,params)};
   if(district)regions.push({label:district,value:district});
   else{
     try{
-      if(requests>=maxRequests)truncated=true;
+      if(!canRequest("/v3/config/district",{keywords:city,subdistrict:municipality?2:1,extensions:"base"}))truncated=true;
       else{
         // Municipalities have an extra city layer (e.g. 北京城区). Its code is
         // not a district search region; expand it before calling POI search.
-        requests++;const data=await amap("/v3/config/district",{keywords:city,subdistrict:municipality?2:1,extensions:"base"}),roots=Array.isArray(data.districts)?data.districts as SearchRow[]:[],children=roots.length&&Array.isArray(roots[0].districts)?roots[0].districts as SearchRow[]:[];
+        const data=await request("/v3/config/district",{keywords:city,subdistrict:municipality?2:1,extensions:"base"}),roots=Array.isArray(data.districts)?data.districts as SearchRow[]:[],children=roots.length&&Array.isArray(roots[0].districts)?roots[0].districts as SearchRow[]:[];
         let needsCityFallback=false;
         for(const child of children){
           const intermediate=municipality&&(child.level==="city"||/城区$|郊县$/.test(clean(child.name)));
@@ -226,11 +228,8 @@ export async function discoverBrandStores(amap:AmapSearch,brandInput:string,city
   }
   if(!regions.length)regions.push({label:district||city,value:district||city});
   const found=new Map<string,StoreCandidate>(),assessments=new Map<string,SearchRow>();
-  outer:for(const region of regions){
-    for(const keyword of terms){
-      for(let page=1;page<=maxPages;page++){
-        if(requests>=maxRequests){truncated=true;break outer}
-        requests++;const data=await amap("/v5/place/text",{keywords:keyword,region:region.value,city_limit:true,show_fields:"business,navi",page_size:pageSize,page_num:page}),rows=Array.isArray(data.pois)?data.pois as SearchRow[]:[];
+  const coverage=new Map<string,boolean>(),observed=new Set(regions.map(r=>r.label));
+  function collect(rows:SearchRow[]){
         for(const row of rows){
           // Amap can fall back to nationwide results for an invalid region.
           // Never store those results or declare this municipal cache complete.
@@ -246,13 +245,28 @@ export async function discoverBrandStores(amap:AmapSearch,brandInput:string,city
           }
           mergeCandidate(found,discoveryCandidate(row,plan.brand||brand,terms,options.overrides?.[clean(row.id)]));
         }
-        if(rows.length<pageSize)break;
-        if(page===maxPages)truncated=true;
-      }
-    }
   }
+  async function searchRegion(region:{label:string;value:string},keyword:string,depth=0,parents:string[]=[]):Promise<boolean>{
+    const key=JSON.stringify([region.value,keyword]);if(coverage.has(key))return coverage.get(key)!;coverage.set(key,false);observed.add(region.label);
+    for(let page=1;page<=maxPages;page++){
+      const params={keywords:keyword,region:region.value,city_limit:true,show_fields:"business,navi",page_size:pageSize,page_num:page};
+      if(!canRequest("/v5/place/text",params))return false;
+      const data=await request("/v5/place/text",params),rows=Array.isArray(data.pois)?data.pois as SearchRow[]:[];
+      collect(rows);if(rows.length<pageSize){coverage.set(key,true);return true}
+    }
+    // Amap returns at most 200 rows for the same parameters. When saturated,
+    // subdivide only using real administrative children returned by Amap.
+    if(depth<2&&canRequest("/v3/config/district",{keywords:region.value,subdistrict:1,extensions:"base"})){
+      try{const data=await request("/v3/config/district",{keywords:region.value,subdistrict:1,extensions:"base"}),roots=Array.isArray(data.districts)?data.districts as SearchRow[]:[];
+        const children=(roots[0]&&Array.isArray(roots[0].districts)?roots[0].districts as SearchRow[]:[]).map(r=>({label:clean(r.name),value:clean(r.adcode)||clean(r.name)})).filter(r=>r.value&&r.value!==region.value&&!parents.includes(r.value));
+        if(children.length){let complete=true;for(const child of children)if(!await searchRegion(child,keyword,depth+1,[...parents,region.value]))complete=false;coverage.set(key,complete);return complete}
+      }catch{/* Preserve explicit incomplete coverage when subdivision is unavailable. */}
+    }
+    return false;
+  }
+  for(const region of regions)for(const keyword of terms)if(!await searchRegion(region,keyword))truncated=true;
   const stores=[...found.values()].sort((a,b)=>a.district.localeCompare(b.district,"zh-CN")||a.name.localeCompare(b.name,"zh-CN"));
-  return {stores,...(isPolicyBrand(brand)?{assessments:[...assessments.values()]}:{}),brand:plan.brand||brand,city,district,regions:regions.map(item=>item.label),requests,page_size:pageSize,truncated,complete:!truncated};
+  return {stores,...(isPolicyBrand(brand)?{assessments:[...assessments.values()]}:{}),brand:plan.brand||brand,city,district,regions:[...observed],requests,page_size:pageSize,truncated,complete:!truncated};
 }
 
 export async function searchStoreCandidates(amap:AmapSearch,input:string,city="",district="",address="",maxRequests=6){

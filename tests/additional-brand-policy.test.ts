@@ -5,7 +5,7 @@ import {DEFAULT_SNACK_BRANDS,isRetiredSnackBrand} from "../server/snack-brands.j
 import {discoverBrandStores} from "../server/store-search.js";
 import {additionalBrandFixtures} from "./additional-brand-policy-fixtures.js";
 test("十个新增品牌使用确认的名称、零售业态、异业待核验与硬性排除边界",()=>{
- assert.equal(DEFAULT_SNACK_BRANDS.length,24);
+ assert.equal(DEFAULT_SNACK_BRANDS.length,22);
  for(const {brand,expected,...row} of additionalBrandFixtures){
   assert.equal(assessBrandStore(brand,{id:"ADDITIONAL",...row}).decision,expected,`${brand}/${row.name}/${row.tag}`);
   assert.equal(assessBrandStore(brand,{id:"ADDITIONAL",...row},"exclude").decision,"排除");

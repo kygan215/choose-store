@@ -6,6 +6,7 @@ import { brandNameFormatFixtures } from "./brand-name-format-fixtures.js";
 import { relatedEvidenceFixtures } from "./brand-related-evidence-fixtures.js";
 import { excludedLabelFixtures } from "./brand-excluded-label-fixtures.js";
 import { hxlRetailFixtures } from "./hxl-retail-fixtures.js";
+import {isRetiredSnackBrand} from "../server/snack-brands.js";
 import {identityRejectionFixtures} from "./brand-identity-rejection-fixtures.js";
 
 test("无目标品牌主体的召回直接排除，购物或零食标签不能替代品牌身份",()=>{
@@ -16,8 +17,8 @@ test("无目标品牌主体的召回直接排除，购物或零食标签不能�
 
 test("真实搜索调用路径保留排除审计，只有目标品牌门店进入接受列表",async()=>{
  const hits=identityRejectionFixtures.filter(row=>row.brand==="来优品").map((row,index)=>({...row,id:`NO-${index}`,location:"114,30"}));
- const good={id:"YES",name:"来优品(中心店)",tag:"零食",location:"114,30"};
- const result=await discoverBrandStores(async()=>({pois:[...hits,good]}),"来优品","测试市","测试区");
+ const good={id:"YES",name:"零食很忙(中心店)",tag:"零食",location:"114,30"};
+ const result=await discoverBrandStores(async()=>({pois:[...hits,good]}),"零食很忙","测试市","测试区");
  assert.deepEqual(result.stores.map(row=>row.id),["YES"]);
  assert.ok(result.assessments?.filter(row=>row.id!=="YES").every(row=>row.decision==="排除"));
 });
@@ -236,6 +237,7 @@ test("品牌发现统一保存候选、按POI去重、默认只输出接受，�
 });
 test("品牌库检索只使用系统确认的品牌主体名称，新增别名不绕过名称与标签筛选",async()=>{
  for(const [brand,names] of Object.entries(BRAND_IDENTITIES)){
+  if(isRetiredSnackBrand(brand))continue;
   const keywords:string[]=[];
   await discoverBrandStores(async(path,params)=>{if(path==="/v5/place/text")keywords.push(String(params.keywords));return {pois:[]}},brand,"测试市","测试区",{aliases:["任意相似名称"],maxPagesPerRegion:1});
   assert.deepEqual(keywords,names,brand);

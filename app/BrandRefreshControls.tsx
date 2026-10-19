@@ -1,0 +1,10 @@
+"use client";
+import {useEffect,useState} from "react";
+import {formatBeijingDateTime} from "./time";
+type Schedule={enabled:boolean;weekday:number;hour:number;minute:number;next_run_at:string|null};
+export default function BrandRefreshControls({api}:{api:string}){
+ const [value,setValue]=useState<Schedule|null>(null),[notice,setNotice]=useState(""),[busy,setBusy]=useState(false);
+ useEffect(()=>{const c=new AbortController();void fetch(`${api}/admin/brand-refresh`,{signal:c.signal}).then(r=>r.json()).then(v=>{if(!c.signal.aborted){if(!v.success)throw new Error(v.message);setValue(v.data.schedule)}}).catch(e=>{if(!c.signal.aborted)setNotice(e.message)});return()=>c.abort()},[api]);
+ async function save(){if(!value)return;setBusy(true);try{const r=await fetch(`${api}/admin/brand-refresh`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(value)}),v=await r.json();if(!r.ok||!v.success)throw new Error(v.message);setValue(v.data);setNotice("周期更新设置已保存")}catch(e){setNotice(e instanceof Error?e.message:"保存失败")}finally{setBusy(false)}}
+ return <section className="panel brand-refresh-controls"><h2>全国品牌周期更新</h2><p>按全部启用品牌创建全国更新任务，使用最新查询结果；分品牌排队执行，保存城市与分页断点，自动避开重复运行任务。</p>{notice&&<p role="status">{notice}</p>}{value&&<><div className="history-actions"><label><input type="checkbox" checked={value.enabled} onChange={e=>setValue({...value,enabled:e.target.checked})}/>启用每周更新</label><label>每周<select value={value.weekday} onChange={e=>setValue({...value,weekday:Number(e.target.value)})}>{["日","一","二","三","四","五","六"].map((name,index)=><option value={index} key={index}>星期{name}</option>)}</select></label><label>北京时间<input type="time" value={`${String(value.hour).padStart(2,"0")}:${String(value.minute).padStart(2,"0")}`} onChange={e=>{const [hour,minute]=e.target.value.split(":").map(Number);setValue({...value,hour,minute})}}/></label><button disabled={busy} onClick={()=>void save()}>保存周期设置</button></div><p>{value.enabled?`下次创建更新任务：${value.next_run_at?formatBeijingDateTime(value.next_run_at):"保存后计算"}`:"自动更新未启用"}。查询受高德覆盖及分页限制，无法保证搜齐全部门店。</p></>}</section>;
+}
