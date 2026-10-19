@@ -40,11 +40,11 @@ export async function closeOpsLog(){clearInterval(flushTimer);await buffer.flush
 
 export function requestTelemetry(record:(event:OpsEvent)=>void=recordOps):RequestHandler {
   return (req,res,next)=>{
-    const started=performance.now(),requestId=crypto.randomUUID();res.locals.requestId=requestId;res.setHeader("X-Request-ID",requestId);
+    const started=performance.now(),requestId=crypto.randomUUID(),path=safePath(req.originalUrl||req.url);res.locals.requestId=requestId;res.setHeader("X-Request-ID",requestId);
     res.once("finish",()=>{
       // Monitoring traffic must not generate its own stream of requests and errors.
-      if(req.path==="/api/health"||req.path.startsWith("/api/admin/ops")||req.path==="/api/telemetry/client")return;
-      const durationMs=Math.round(performance.now()-started),status=res.statusCode,path=safePath(req.path);
+      if(path==="/api/health"||path.startsWith("/api/admin/ops")||path==="/api/telemetry/client"||/^\/api\/brand-library\/jobs\/\d+\/diagnostics$/.test(path))return;
+      const durationMs=Math.round(performance.now()-started),status=res.statusCode;
       const level=status>=500?"error":status>=400||durationMs>=3000?"warn":"info";
       const task=/\/brand-library\/jobs\/(\d+)/.exec(path)||/\/jobs\/(\d+)/.exec(path);
       record({tenantId:req.user?.tenantId,service:"api",level,module:"http",event:status>=500?"request_failed":durationMs>=3000?"request_slow":"request_completed",message:`${req.method} ${path} → ${status}`,requestId,taskType:task?(path.includes("brand-library")?"brand_discovery":"analysis"):undefined,taskId:task?.[1],durationMs,statusCode:status,details:{method:req.method,path}});

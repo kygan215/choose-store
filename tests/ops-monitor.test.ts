@@ -20,6 +20,11 @@ test("管理员入口拒绝普通账号，并允许管理员",async()=>{
   const server=app.listen(0,"127.0.0.1");await new Promise<void>(resolve=>server.once("listening",resolve));const address=server.address();assert.ok(address&&typeof address!=="string");
   try{const base=`http://127.0.0.1:${address.port}/ops`;assert.equal((await fetch(base)).status,403);assert.equal((await fetch(base,{headers:{"x-test-role":"admin"}})).status,200)}finally{server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()))}
 });
+test("认证提前结束请求时保留完整路径，监控页面不记录自身轮询",async()=>{
+  const events:OpsEvent[]=[],app=express();app.use(requestTelemetry(e=>events.push(e)));app.use("/api",(_req,res)=>res.status(401).end());
+  const server=app.listen(0,"127.0.0.1");await new Promise<void>(resolve=>server.once("listening",resolve));const address=server.address();assert.ok(address&&typeof address!=="string");const base=`http://127.0.0.1:${address.port}`;
+  try{await fetch(base+"/api/jobs/9?token=private");await fetch(base+"/api/admin/ops/logs");await fetch(base+"/api/brand-library/jobs/9/diagnostics");assert.equal(events[0].details?.path,"/api/jobs/9");assert.equal(events.length,1)}finally{server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()))}
+});
 test("日志失败与积压不能无限占用内存或重试阻塞业务",async()=>{
   const writes:OpsEvent[][]=[],buffer=createLogBuffer(async rows=>{writes.push(rows);throw new Error("db offline")},2);
   for(let i=0;i<3;i++)buffer.add({service:"api",level:"info",module:"test",event:"fixture",message:String(i)});
