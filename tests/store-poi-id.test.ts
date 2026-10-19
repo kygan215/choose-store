@@ -8,7 +8,7 @@ test("单店名称框直接输入 POI ID 时查询详情，不把 ID 当普通�
 });
 test("显式 POI ID 未查到时不会用其他同名门店替代",async()=>{
  const calls:string[]=[];const rows=await resolveStoreCandidates({poiId:poi.id,searchName:poi.name},async(path)=>{calls.push(path);return {pois:[{...poi,id:"B0OTHER001"}]}});
- assert.deepEqual(calls,["/v5/place/detail"]);assert.deepEqual(rows,[]);
+ assert.ok(calls.includes("/v5/place/detail"));assert.ok(calls.every(path=>path.endsWith("/place/detail")||path==="/v3/assistant/inputtips"));assert.deepEqual(rows,[]);
 });
 test("POI ID 一致但填写城市冲突时保留候选并要求人工核对",async()=>{
  const rows=await resolveStoreCandidates({poiId:poi.id,searchName:poi.name,city:"武汉市"},async()=>({pois:[poi]}));

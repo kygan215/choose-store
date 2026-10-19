@@ -4,6 +4,7 @@ import multer from "multer";
 import type {PoolClient} from "pg";
 import {pool,query} from "./db.js";
 import {resolveStoreCandidates} from "./services.js";
+import {exactPoiLookupProblem} from "./poi-lookup-problem.js";
 import {exactHistoryPreview,validateExactHistoryLinks,cacheHistoryCandidates} from "./history-matching.js";
 import {HistoryLinkError,applyHistoryLinks,historyLinkCollisions,linkHistoryStores} from "./history-linking.js";
 import {saveHistoryLocation,searchAnalysisHistoryCandidates,linkHistoryAnalysisStore,createHistoryAnalysisStore} from "./history-location.js";
@@ -79,12 +80,12 @@ router.post("/stores/:id/amap-candidates",requireAdmin,wrap(async(req,res)=>{
   const requestedPoi=/^B[A-Z0-9]{9}$/i.test(name)?name.toUpperCase():"";
   const foundRaw=await resolveStoreCandidates({originalName:str(source.store_name),searchName:name,province:str(source.province),city:str(source.city),address:searchAddress,locationShare,longitude:req.body?.longitude??source.verified_longitude,latitude:req.body?.latitude??source.verified_latitude,poiId:requestedPoi||(str(req.body?.q)?"":str(source.poi_id))},async(path,params)=>{await consumeBackgroundQuota(tenantId,{userId:req.user!.id,sourceType:"history_matching",sourceId:id,operation:"manual_candidate_search",details:{path,page:params.page_num||params.page}});return amapRequest(path,params)});
   const found=requestedPoi?foundRaw.filter(row=>String(row.id).toUpperCase()===requestedPoi):foundRaw;
-  if(requestedPoi&&!found.length)return bad(res,"高德未返回该 POI ID 的门店，请核对 ID 后重试",404,null,"HISTORY_POI_NOT_FOUND");
+  if(requestedPoi&&!found.length){const problem=exactPoiLookupProblem(foundRaw.diagnostics);return bad(res,problem.message,problem.status,{diagnostics:foundRaw.diagnostics},problem.code)}
   await cacheHistoryCandidates(tenantId,{...source,id},found.filter(item=>/^B[A-Z0-9]{9}$/i.test(String(item.id))) as unknown as DataRow[]);
   const pois=[...new Map(found.filter(item=>item.id&&!/^(COORD-|GEOCODE-)/i.test(String(item.id))&&item.source!=="amap_geocode").map(item=>[String(item.id),item])).values()].slice(0,10);
   const ids=pois.map(item=>String(item.id));
   const library=ids.length?(await query<Candidate>("SELECT id,brand_name,amap_name,province,city,address,amap_poi_id FROM brand_stores WHERE tenant_id=$1 AND amap_poi_id=ANY($2::text[])",[tenantId,ids])).rows.map(item=>({...item,id:Number(item.id)})):[];
-  return respond(res,{rows:pois.map(item=>({id:item.id,name:item.name,province:item.province,city:item.city,district:item.district,address:item.address,type:item.type,score:item.score,reasons:item.reasons||[],conflicts:item.conflicts||[],warnings:item.warnings||[],library_candidates:historyAmapLibraryCandidates(source as never,item,library)})),diagnostics:(foundRaw as unknown as {diagnostics?:unknown}).diagnostics||null},"高德候选已返回，请核对后人工确认；查询不会修改历史活动关联");
+  return respond(res,{rows:pois.map(item=>({id:item.id,name:item.name,province:item.province,city:item.city,district:item.district,address:item.address,type:item.type,score:item.score,source:item.source,evidence:item.evidence,reasons:item.reasons||[],conflicts:item.conflicts||[],warnings:item.warnings||[],library_candidates:historyAmapLibraryCandidates(source as never,item,library)})),diagnostics:(foundRaw as unknown as {diagnostics?:unknown}).diagnostics||null},"高德候选已返回，请核对后人工确认；查询不会修改历史活动关联");
 }));
 router.patch("/stores/:id/location",requireAdmin,wrap(async(req,res)=>respond(res,await saveHistoryLocation(req.user!.tenantId,req.user!.id,positiveId(req.params.id),req.body||{},req.ip||"",async(longitude,latitude)=>{
  await consumeBackgroundQuota(req.user!.tenantId,{userId:req.user!.id,sourceType:"history_matching",sourceId:positiveId(req.params.id),operation:"manual_location_region_check",details:{path:"/v3/geocode/regeo"}});

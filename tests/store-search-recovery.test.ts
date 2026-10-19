@@ -45,7 +45,7 @@ test("分享标识详情空时仍可沿分享位置检索，无真实结果则�
 });
 
 test("手填精确 ID 即使同时提供分享位置也不能静默转为附近其他门店",async()=>{
- const calls:string[]=[];const rows=await resolveStoreCandidates({searchName:input,poiId:"B0M17UF52A",locationShare:"https://uri.amap.com/marker?position=113.910898,30.913213"},async(path)=>{calls.push(path);return {pois:[]}});assert.deepEqual(calls,["/v5/place/detail"]);assert.equal(rows.length,0);
+ const calls:string[]=[];const rows=await resolveStoreCandidates({searchName:input,poiId:"B0M17UF52A",locationShare:"https://uri.amap.com/marker?position=113.910898,30.913213"},async(path)=>{calls.push(path);return {pois:[]}});assert.ok(calls.includes("/v5/place/detail"));assert.ok(calls.every(path=>path.endsWith("/place/detail")||path==="/v3/assistant/inputtips"));assert.equal(rows.length,0);
 });
 test("配额暂停不能被搜索容错吞成空结果",async()=>{
  class QuotaPauseError extends Error{}

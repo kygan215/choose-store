@@ -4,7 +4,7 @@ import { amapRating } from "../app/amap-rating.js";
 import { amapTel } from "../app/amap-contact.js";
 import { DEFAULT_SNACK_BRANDS, canonicalSnackBrand, isRetiredSnackBrand } from "./snack-brands.js";
 import { classifyResolutionCandidates } from "./store-resolution.js";
-import { canRetainSnackStore, isSnackRetailStore, snackTags } from "./snack-retail.js";
+import { canRetainSnackStore, hasClearlyNonSnackEvidence, isSnackRetailStore, snackTags } from "./snack-retail.js";
 
 export type SearchRow=Record<string,unknown>;
 export type StorePhoto={title:string;url:string};
@@ -12,13 +12,14 @@ export type StoreCandidate={
   id:string;name:string;address:string;province:string;city:string;district:string;
   location:[number,number];type:string;typecode:string;tag?:string;rating?:number|null;tel?:string|null;score:number;status:string;
   reasons:string[];source:string;search_query:string;auto_confirm:boolean;requires_review?:boolean;photos:StorePhoto[];conflicts:string[];warnings:string[];
+  evidence?:{provider:"amap";endpoint:"/v3/assistant/inputtips";queried_at:string;verification:"unverified";reason:string};
 };
 export type StoreSearchPlan={
   original:string;brand:string;core:string;province:string;city:string;district:string;
   region:string;queries:string[];brand_aliases:string[];location_hints:string[];address_hints:string[];
 };
 export type AmapSearch=((path:string,params:Record<string,string|number|boolean>)=>Promise<SearchRow>)&{isCached?:(path:string,params:Record<string,string|number|boolean>)=>boolean};
-export type StoreSearchDiagnostics={requests:number;max_requests:number;budget_exhausted:boolean;failed_stages:string[];warnings:string[];location_hints?:{name:string;address:string;longitude:number|null;latitude:number|null;poi_id?:string;poi_verified:boolean}};
+export type StoreSearchDiagnostics={requests:number;max_requests:number;budget_exhausted:boolean;failed_stages:string[];warnings:string[];location_hints?:{name:string;address:string;longitude:number|null;latitude:number|null;poi_id?:string;poi_verified:boolean};poi_lookup?:{requested_id:string;detail_status:"found"|"empty"|"missing_location"|"filtered"|"failed";recovery_source?:"v3_detail"|"inputtips";recovery_attempted:boolean}};
 export type StoreCandidateList=StoreCandidate[]&{diagnostics:StoreSearchDiagnostics};
 export function withStoreSearchDiagnostics<T>(rows:T[],diagnostics:StoreSearchDiagnostics):T[]&{diagnostics:StoreSearchDiagnostics}{Object.defineProperty(rows,"diagnostics",{value:diagnostics,enumerable:false,configurable:true});return rows as T[]&{diagnostics:StoreSearchDiagnostics}}
 export type BrandStoreDiscoveryResult={
@@ -184,6 +185,28 @@ export function scoreStoreCandidate(raw:SearchRow,plan:StoreSearchPlan,source="t
   return {id:clean(raw.id)||`${name}|${location.join(",")}`,name,address,province:poiProvince,city:poiCity,district:poiDistrict,location,type:clean(raw.type),typecode:clean(raw.typecode),tag:snackTags(raw),rating:amapRating(raw),tel:amapTel(raw),score,status:autoConfirm?"高置信度":score>=55?"中置信度":"低置信度",reasons,source,search_query:searchQuery,auto_confirm:autoConfirm,photos:normalizeStorePhotos(raw.photos),conflicts,warnings:needsReview?["高德标签不足以核验，疑似目标门店已保留，请核对后确认"]:[]};
 }
 
+// Generic dining/service labels can be inaccurate for a real chain. Keep them
+// reviewable, but never retain explicit incompatible businesses as chain stores.
+function hardUnrelatedTip(row:SearchRow){
+  const codes=clean(row.typecode).replace(/\s/g,"").split(/[|;,]/),body=clean(row.name).normalize("NFKC").replace(/\s/g,"").split(/[（(]/)[0];
+  const unrelatedCode=codes.some(code=>/^\d{6}$/.test(code)&&!/^(?:05\d{4}|06\d{4}|070000)$/.test(code));
+  const unrelatedSuffix=/(?:按摩|洗浴|足疗|推拿|中医馆|医疗|医院|药房|药店|培训(?:机构|学校)?|公司|住宿|宾馆|酒店|化妆品|成人用品|服装|物流|仓储|台球|垂钓|钓具)(?:店|馆|中心|站|服务)?$/.test(body);
+  return unrelatedCode||unrelatedSuffix||hasClearlyNonSnackEvidence(row)||/按摩|洗浴|足疗|推拿|中医|医疗|医院|药房|药店|培训|学校|公司企业|住宅区|住宿服务|宾馆|酒店|化妆品|成人用品|服装鞋帽|物流|仓储|台球|垂钓|钓具/.test(`${clean(row.type)};${snackTags(row)}`);
+}
+
+/** A returned input tip is evidence of a possible POI, not verified detail. */
+export function scoreUnverifiedInputTip(raw:SearchRow,plan:StoreSearchPlan,query:string,warning:string,queriedAt=new Date().toISOString()):StoreCandidate|null{
+  const id=clean(raw.id).toUpperCase(),location=parseLocation(raw.location),brand=findBrand(clean(raw.name))?.group.canonical;
+  if(!/^B[A-Z0-9]{9}$/.test(id)||!location||location[0]<72.004||location[0]>137.8347||location[1]<0.8293||location[1]>55.8271||!brand||(plan.brand&&brand!==plan.brand)||hardUnrelatedTip(raw))return null;
+  const path=parseRegionPath(raw.district),province=clean(raw.pname)||clean(raw.province)||path.province,city=clean(raw.cityname)||clean(raw.city)||path.city;
+  // A target region is a search constraint, not evidence of the tip's region.
+  if(!province||!city)return null;
+  const candidate=scoreStoreCandidate({...raw,id},plan,"inputtips",query);if(!candidate)return null;
+  const provinceKey=(value:string)=>PROVINCES.find(name=>value.startsWith(name))||value;
+  const conflicts=unique([...candidate.conflicts,...(plan.province&&provinceKey(plan.province)!==provinceKey(province)?["省份冲突：输入提示所在省份与搜索目标不同"]:[])]);
+  return {...candidate,id,province,city,auto_confirm:false,requires_review:true,status:"输入提示候选，详情待核实",source:"inputtips",conflicts,reasons:unique([...candidate.reasons,"高德输入提示返回该 POI 标识、位置及行政区，详情尚未核实"]),warnings:unique([...candidate.warnings,warning,"此候选仅有输入提示证据，请核对品牌、门店名称、地址和位置后人工确认"]),evidence:{provider:"amap",endpoint:"/v3/assistant/inputtips",queried_at:queriedAt,verification:"unverified",reason:warning}};
+}
+
 function mergeCandidate(target:Map<string,StoreCandidate>,candidate:StoreCandidate|null){
   if(!candidate)return;
   const key=candidate.id||`${candidate.name}|${candidate.location.join(",")}`,existing=target.get(key);
@@ -310,13 +333,15 @@ export async function searchStoreCandidates(amap:AmapSearch,input:string,city=""
       let candidate=tip;
       // Input tips usually omit business/category evidence. Verify their POI ID
       // before treating a brand name as a snack shop, within the request budget.
-      if((plan.brand||/零食/.test(plan.original))&&!isSnackRetailStore(tip)){
+      if((plan.brand||/零食/.test(plan.original)||findBrand(clean(tip.name)))&&!isSnackRetailStore(tip)){
         if(!clean(tip.id)||!parseLocation(tip.location))continue;
-        if(budget-diagnostics.requests<=reserve){diagnostics.budget_exhausted=true;warn("已为地标和附近门店召回预留请求，部分输入提示详情未执行；未核验提示不等于没有门店");continue}
+        if(budget-diagnostics.requests<=reserve){diagnostics.budget_exhausted=true;const warning="已为地标和附近门店召回预留请求，部分输入提示详情未执行；未核验提示不等于没有门店";warn(warning);mergeCandidate(found,scoreUnverifiedInputTip(tip,plan,plan.original,warning));continue}
         const detail=await call("提示门店详情","/v5/place/detail",{id:clean(tip.id),show_fields:"business,navi,photos"});
         const rows=Array.isArray(detail?.pois)?detail.pois as SearchRow[]:[];
-        const matched=rows.find(row=>clean(row.id)===clean(tip.id));if(!matched)continue;
+        const matched=rows.find(row=>clean(row.id).toUpperCase()===clean(tip.id).toUpperCase());
+        if(!matched){if(!rows.length)mergeCandidate(found,scoreUnverifiedInputTip(tip,plan,plan.original,detail?"高德输入提示返回该 POI，但详情接口未返回对应详情，需人工核实":"高德输入提示返回该 POI，但详情请求失败、核验未完成，需人工核实"));continue}
         candidate={...tip,...matched};
+        if(hardUnrelatedTip(candidate)||(plan.brand&&findBrand(clean(candidate.name))?.group.canonical!==plan.brand))continue;
       }
       mergeCandidate(found,scoreStoreCandidate(candidate,plan,"inputtips",plan.original));
     }
@@ -338,7 +363,7 @@ export async function searchStoreCandidates(amap:AmapSearch,input:string,city=""
   }
   if(address)ranked=ranked.map(item=>({...item,reasons:unique([...item.reasons,"已参考用户填写的详细地址"])}));
   const candidates=classifyResolutionCandidates(ranked.slice(0,20)).candidates.map(candidate =>
-    (plan.brand || /零食/.test(plan.original)) && !isSnackRetailStore(candidate)
+    (plan.brand || /零食/.test(plan.original) || findBrand(candidate.name)) && !isSnackRetailStore(candidate)
       ? {...candidate,auto_confirm:false,requires_review:true,status:"标签待核验"}
       : candidate);
   return withStoreSearchDiagnostics(candidates.map(candidate=>({...candidate,warnings:unique([...candidate.warnings,...diagnostics.warnings])})),diagnostics);

@@ -6,7 +6,7 @@ import { DEFAULT_SNACK_BRANDS } from "./snack-brands.js";
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { callDeepSeek, type AggregateStore } from "../app/api/deepseek.js";
 import { scoreBand, scoreEnvironmentProxies, scorePoiEnvironment } from "../app/scoring.js";
-import { buildStoreSearchPlan, discoverBrandStores as discoverBrandStoreRows, scoreStoreCandidate, searchStoreCandidates, withStoreSearchDiagnostics, type StoreSearchDiagnostics } from "./store-search.js";
+import { buildStoreSearchPlan, discoverBrandStores as discoverBrandStoreRows, scoreStoreCandidate, scoreUnverifiedInputTip, searchStoreCandidates, withStoreSearchDiagnostics, type StoreSearchDiagnostics } from "./store-search.js";
 import { resolveStoreLocationHints } from "./store-location-hints.js";
 import { DASHBOARD_PROVINCES } from "../shared/brand-dashboard.js";
 import { classifyResolutionCandidates, combineStoreAddress, type StoreResolutionInput } from "./store-resolution.js";
@@ -46,14 +46,38 @@ export async function resolveStoreCandidates(input:Partial<StoreResolutionInput>
   const finish=(rows:Row[])=>withStoreSearchDiagnostics(rows.map((row):Row=>({...row,warnings:[...new Set([...(row.warnings||[]),...diagnostics.warnings])]})),diagnostics);
   const safely=async(stage:string,path:string,params:Record<string,unknown>)=>{if(diagnostics.requests>=diagnostics.max_requests){diagnostics.budget_exhausted=true;diagnostics.warnings.push(`检索预算已用完，未执行${stage}`);return null}diagnostics.requests++;try{return await request(path,params)}catch(error){if(error instanceof Error&&error.constructor.name==="QuotaPauseError")throw error;diagnostics.failed_stages.push(stage);diagnostics.warnings.push(`${stage}接口暂时失败，未完成的搜索不能视为没有门店`);return null}};
   if(directPoiId){
-    let data:Row|null;
-    if(explicitPoiId){diagnostics.requests++;data=await request("/v5/place/detail",{id:directPoiId,show_fields:"business,navi,photos"})}
-    else data=await safely("分享标识详情核验","/v5/place/detail",{id:directPoiId,show_fields:"business,navi,photos"});
-    const rows=(Array.isArray(data?.pois)?data.pois as Row[]:[]).filter(row=>clean(row.id).toUpperCase()===directPoiId);
-    const found=rows.length?await searchStoreCandidates(async()=>({status:"1",pois:rows}),nameIsPoi?clean(rows[0].name):baseName||clean(rows[0].name),clean(input.city),clean(input.district),address,1):[];
-    if(found[0]){const expectedProvince=clean(input.province).replace(/省|市$/g,""),actualProvince=clean(found[0].province).replace(/省|市$/g,"");if(expectedProvince&&actualProvince&&expectedProvince!==actualProvince)found[0].conflicts.push(`省份冲突：填写“${clean(input.province)}”，POI 位于“${found[0].province}”`);found[0].score=100;found[0].reasons.unshift("用户提供的高德 POI ID 完全一致");found[0].auto_confirm=!found[0].requires_review&&!found[0].conflicts?.length;found[0].status=found[0].requires_review?"标签待核验":found[0].conflicts?.length?"POI ID 一致，位置或名称需核对":"高置信度"}
-    diagnostics.location_hints!.poi_verified=rows.length>0;
-    if(explicitPoiId||rows.length)return finish(found);
+    const lookup:NonNullable<StoreSearchDiagnostics["poi_lookup"]>={requested_id:directPoiId,detail_status:"empty",recovery_attempted:false};diagnostics.poi_lookup=lookup;
+    const expectedName=[clean(input.originalName),baseName].find(value=>value&&!/^B[A-Z0-9]{9}$/i.test(value))||"";
+    const provinceConflict=(candidate:Row)=>{const expected=clean(input.province).replace(/省|市$/g,""),actual=clean(candidate.province).replace(/省|市$/g,"");if(expected&&actual&&expected!==actual)candidate.conflicts.push(`省份冲突：填写“${clean(input.province)}”，POI 位于“${candidate.province}”`)};
+    for(const [stage,path,params] of [
+      ["POI 新版详情核验","/v5/place/detail",{id:directPoiId,show_fields:"business,navi,photos"}],
+      ["POI 旧版详情核验","/v3/place/detail",{id:directPoiId,extensions:"all"}],
+    ] as const){
+      if(path==="/v3/place/detail")lookup.recovery_attempted=true;
+      const data=await safely(stage,path,params);if(!data){if(lookup.detail_status==="empty")lookup.detail_status="failed";continue}
+      const rows=(Array.isArray(data.pois)?data.pois as Row[]:[]).filter(row=>clean(row.id).toUpperCase()===directPoiId);
+      if(!rows.length)continue;
+      diagnostics.location_hints!.poi_verified=true;
+      const usable=rows.filter(row=>parseLocation(row.location));if(!usable.length){lookup.detail_status="missing_location";continue}
+      const found=await searchStoreCandidates(async()=>({status:"1",pois:usable}),expectedName||clean(usable[0].name),clean(input.city),clean(input.district),address,1);
+      if(!found.length){lookup.detail_status="filtered";continue}
+      lookup.detail_status="found";if(path==="/v3/place/detail")lookup.recovery_source="v3_detail";
+      provinceConflict(found[0]);found[0].score=100;found[0].reasons.unshift("用户提供的高德 POI ID 完全一致");found[0].auto_confirm=!found[0].requires_review&&!found[0].conflicts?.length;found[0].status=found[0].requires_review?"标签待核验":found[0].conflicts?.length?"POI ID 一致，位置或名称需核对":"高置信度";
+      return finish(found);
+    }
+    // Amap's input-tip index may expose a real POI before either detail index.
+    // Re-query independent server-side clues, and retain ONLY the requested ID.
+    // These observations stay reviewable; an unrelated neighbour cannot replace it.
+    if(lookup.detail_status!=="filtered")for(const query of [...new Set([expectedName,address].filter(Boolean))].slice(0,2)){
+      lookup.recovery_attempted=true;const params:Row={keywords:query};if(clean(input.city)){params.city=clean(input.city);params.citylimit=true}
+      const data=await safely("同 ID 输入提示核验","/v3/assistant/inputtips",params),tips=Array.isArray(data?.tips)?data.tips as Row[]:[];
+      const plan=buildStoreSearchPlan(expectedName||query,clean(input.city),clean(input.district),address);
+      for(const tip of tips.filter(row=>clean(row.id).toUpperCase()===directPoiId)){
+        const found=scoreUnverifiedInputTip(tip,plan,query,"高德输入提示返回相同 POI ID，但详情接口暂未返回完整门店信息，请核对名称、地址和位置后人工确认");
+        if(!found)continue;provinceConflict(found);found.reasons.unshift("输入提示返回的 POI ID 与用户指定 ID 完全一致");lookup.recovery_source="inputtips";return finish([found]);
+      }
+    }
+    if(explicitPoiId||diagnostics.location_hints!.poi_verified)return finish([]);
     // A consumer-share identifier is not necessarily resolvable by the open
     // detail API. Its location may still help recall a real, separate POI.
     diagnostics.warnings.push("分享标识未得到开放接口确认，仅作位置线索；不会将该标识保存为已核实 POI ID");
